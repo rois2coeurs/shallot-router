@@ -1,0 +1,7 @@
+[package]
+name = "shallot-churn"
+version.workspace = true
+edition.workspace = true
+respository.workspace = true
+
+[dependencies]

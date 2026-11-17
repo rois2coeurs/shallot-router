@@ -1,0 +1,30 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/foundation/*",
+    "crates/protocol/*",
+    "crates/testbed/*",
+    "crates/apps/*",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+respository = "https://github.com/rois2coeurs/shallot-router"
+
+[workspace.dependencies]
+shallot-types 		= { path = "crates/foundation/types" }
+shallot-core 		= { path = "crates/foundation/core" }
+
+shallot-crypto 		= { path = "crates/protocol/crypto" }
+shallot-relay 		= { path = "crates/protocol/relay" }
+shallot-rps 		= { path = "crates/protocol/rps" }
+shallot-layers 		= { path = "crates/protocol/layers" }
+shallot-routing		= { path = "crates/protocol/routing" }
+shallot-prediction		= { path = "crates/protocol/prediction" }
+shallot-esquad		= { path = "crates/protocol/esquad" }
+shallot-transfer		= { path = "crates/protocol/transfer" }
+shallot-node		= { path = "crates/protocol/node" }
+
+shallot-chrun		= { path = "crates/testbed/churn" }
+shallot-simulation	= { path = "crates/testbed/simulation" }
