@@ -10,7 +10,7 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-respository = "https://github.com/rois2coeurs/shallot-router"
+repository = "https://github.com/rois2coeurs/shallot-router"
 
 [workspace.dependencies]
 shallot-types 		= { path = "crates/foundation/types" }
@@ -26,5 +26,10 @@ shallot-esquad		= { path = "crates/protocol/esquad" }
 shallot-transfer		= { path = "crates/protocol/transfer" }
 shallot-node		= { path = "crates/protocol/node" }
 
-shallot-chrun		= { path = "crates/testbed/churn" }
+shallot-churn		= { path = "crates/testbed/churn" }
 shallot-simulation	= { path = "crates/testbed/simulation" }
+
+serde			= { version = "1", features = ["derive"] }
+thiserror		= "2"
+ciborium		= "0.2"
+proptest		= "1"

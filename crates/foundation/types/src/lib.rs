@@ -1,14 +1,28 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
+pub mod crypto;
+pub mod error;
+pub mod interaction;
+pub mod node;
+pub mod routing;
+pub mod time;
+pub mod transfer;
+pub mod wire;
+
+pub use crypto::{Digest, PublicKey};
+pub use error::TypesError;
+pub use interaction::{Interaction, InteractionKind};
+pub use node::{NodeAddr, NodeDescriptor, NodeId, NodeInfo, Probability};
+pub use routing::{HalfRoute, Layer, Route};
+pub use time::Round;
+pub use transfer::{Ack, Chunk, ChunkIndex, FileDescriptor, FileId};
+pub use wire::{Ciphertext, Envelope, EnvelopeEntry, ShallotMessage};
 
 #[cfg(test)]
-mod tests {
-    use super::*;
+pub(crate) mod test_utils {
+    use serde::{Serialize, de::DeserializeOwned};
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
+    pub fn cbor_roundtrip<T: Serialize + DeserializeOwned>(value: &T) -> T {
+        let mut buf = Vec::new();
+        ciborium::into_writer(value, &mut buf).expect("encode");
+        ciborium::from_reader(buf.as_slice()).expect("decode")
     }
 }
