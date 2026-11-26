@@ -1,109 +1,107 @@
 # Format des traces (v1)
 
-Toute l'évaluation (E1 à E5) et la visualisation (#38) se calculent a posteriori sur ces traces : un événement absent ici ne pourra pas être mesuré plus tard sans relancer les campagnes.
-
-Décisions appliquées : T12 (lignes JSON), T11 (relecture en Python avec pandas), D8 (la disponibilité réelle n'est jamais lue par le protocole).
+Une trace décrit une exécution, simulée ou réelle, événement par événement. Ce document donne la liste des événements, leurs champs et la façon de relire une trace.
 
 Fichiers associés :
 
-- [evaluation/traces.py](../evaluation/traces.py) : schéma, chargement pandas, validation ;
-- [evaluation/exemples/trace-exemple.jsonl](../evaluation/exemples/trace-exemple.jsonl) : trace d'exemple qui contient chaque type d'événement au moins une fois.
+- [evaluation/traces.py](../evaluation/traces.py) : schéma, chargement avec pandas, validation ;
+- [evaluation/examples/example_trace.jsonl](../evaluation/examples/example_trace.jsonl) : trace d'exemple qui contient chaque type d'événement au moins une fois.
 
 ## 1. Principes
 
-- **Un fichier par exécution** : `trace.jsonl`, ou `trace.jsonl.gz` (pandas décompresse seul). Une ligne = un objet JSON = un événement, en UTF-8, sans ligne vide.
-- **Ordre** : les lignes sont écrites dans l'ordre d'exécution, donc `t` ne décroît jamais. En réseau réel (un fichier par processus), on fusionne les fichiers par un tri stable sur `t`.
-- **Bornes** : la première ligne est `run_start`, la dernière `run_end`. Une trace sans `run_end` est une exécution interrompue.
-- **Déterminisme** : même graine, même trace, octet pour octet (#12). Aucune valeur ne dépend de l'horloge murale ni de l'ordre d'itération d'une table de hachage. C'est pourquoi un coût est noté en nombre d'opérations, jamais en temps CPU.
-- **Séparation (D8)** : `run_start`, `device`, `churn` et `run_end` sont écrits par le banc d'essai (`crates/testbed`) et par lui seul. Les crates du protocole écrivent tous les autres événements, et aucun crate du protocole ne lit une trace.
-- **Aucun contenu sensible** : ni clé, ni clair, ni données de chunk. Les messages sont désignés par une empreinte (`mid`, §3).
-- **Version** : `run_start.v` vaut 1. Ajouter un champ facultatif ne change pas la version. Renommer ou retirer un champ, ou en changer le sens, l'incrémente : on met alors à jour ce document, `evaluation/traces.py` et la trace d'exemple dans la même PR.
+- **Un fichier par exécution** : `trace.jsonl`, ou `trace.jsonl.gz`. Une ligne = un objet JSON = un événement, en UTF-8, sans ligne vide.
+- **Ordre** : les lignes sont écrites dans l'ordre d'exécution, donc `time_ms` ne décroît jamais. À `time_ms` égal, l'ordre des lignes est l'ordre d'exécution. En réseau réel, avec un fichier par processus, on fusionne les fichiers par un tri stable sur `time_ms`.
+- **Bornes** : la première ligne est `run_started`, la dernière `run_ended`. Une trace sans `run_ended` est une exécution interrompue.
+- **Déterminisme** : même graine, même trace, octet pour octet. Aucune valeur ne dépend du temps réel ni de l'ordre d'itération d'une table de hachage : un coût est noté en nombre d'opérations, jamais en durée.
+- **Séparation** : `run_started`, `device_declared`, `availability_changed` et `run_ended` sont écrits par le banc d'essai (`crates/testbed`) et par lui seul. Les crates du protocole écrivent tous les autres événements. Aucun crate du protocole ne lit une trace.
+- **Aucun contenu sensible** : ni clé, ni clair, ni données de chunk. Les messages sont désignés par une empreinte (`message_id`, §3).
+- **Version** : `run_started.version` vaut 1. Ajouter un champ facultatif ne change pas la version. Renommer ou retirer un champ, ou en changer le sens, l'incrémente ; ce document, `evaluation/traces.py` et la trace d'exemple sont alors mis à jour ensemble.
 
 ## 2. Champs communs
 
 | Champ | Type | Sens |
 |---|---|---|
-| `t` | entier ≥ 0 | temps virtuel en millisecondes depuis le début de l'exécution |
-| `node` | entier, ou `null` | appareil qui écrit l'événement ; `null` seulement pour `run_start` et `run_end` |
-| `ev` | chaîne | type de l'événement (§4) |
+| `time_ms` | entier ≥ 0 | temps virtuel, en millisecondes depuis le début de l'exécution |
+| `node` | entier, ou `null` | appareil qui écrit l'événement ; `null` seulement pour `run_started` et `run_ended` |
+| `event` | chaîne | type de l'événement (§4) |
 
-Le tour i (`Round`) d'un événement se déduit de `t` : i = ⌊t / `params.T_ms`⌋.
+En simulation, le temps virtuel avance par sauts : seuls la latence d'un saut réseau, l'expiration d'un délai et le passage au tour suivant le font progresser. Le traitement d'un message ne prend aucun temps virtuel, si bien que plusieurs événements partagent souvent le même `time_ms`.
+
+Le tour i (`Round`) d'un événement vaut ⌊`time_ms` / `params.round_duration_ms`⌋.
 
 ## 3. Conventions de valeurs
 
 | Valeur | Représentation |
 |---|---|
-| Appareil | entier attribué par le banc d'essai (0 à N − 1), plus court qu'un `NodeId` ; l'événement `device` donne la correspondance avec le `NodeId` |
-| `file` | `FileId` (δ.ID) : UUID v4 en chaîne avec tirets, tel que serde le sérialise ; identifie le fichier et le canal |
+| Appareil (`node`, `target`, `members`…) | entier attribué par le banc d'essai, de 0 à N − 1 ; `device_declared` donne son `NodeId` |
+| `file` | `FileId` : SHA-256 du fichier, en 64 caractères hexadécimaux minuscules ; identifie le fichier et son canal |
 | `index` | `ChunkIndex` : rang du chunk, à partir de 0 |
-| `mid` | empreinte d'un message tel qu'il passe sur un lien : les 16 premiers caractères hexadécimaux du SHA-256 des octets envoyés |
-| `dir` | `"fwd"` : route aller (Alice → Bob, chunks) ; `"bwd"` : route retour (Bob → Alice, ACK) |
-| `pos` | rang de la couche dans la route, de 1 à 4 ; 4 est l'e-squad du destinataire |
-| Durées, tailles | millisecondes (suffixe `_ms`), octets |
-| Probabilités | flottants dans [0, 1] (`Probability`) |
-| Tours | entier i (`Round`) |
+| `message_id` | empreinte d'un message tel qu'il passe sur un lien : les 16 premiers caractères hexadécimaux du SHA-256 des octets envoyés |
+| `direction` | `"forward"` : route aller (Alice → Bob, chunks) ; `"backward"` : route retour (Bob → Alice, ACK) |
+| `position` | rang de la couche dans la route, de 1 à 4 ; 4 est l'e-squad du destinataire |
+| Durées, tailles | millisecondes (suffixe `_ms`), octets (suffixe `_bytes`) |
+| Probabilités | flottants dans [0, 1] |
 
-**Le `mid` permet de reconstituer le chemin d'un message sans rien ajouter au protocole.** Un relais note le `mid` du message reçu et celui du message qu'il réémet (`relay_recv.mid` → `relay_recv.out`), et chaque saut porte le `mid` des octets envoyés. On chaîne donc `chunk_sent` → `hop` → `relay_recv` → `hop` → … → `esquad_rx`. Un même message essayé sur plusieurs membres d'une couche garde son `mid`. Un renvoi est rechiffré : il a un `mid` différent.
+**Suivre un message.** Un relais note le `message_id` du message reçu et celui du message qu'il réémet (`relay_received.message_id` → `relay_received.forwarded_message_id`), et chaque saut porte le `message_id` des octets envoyés. On chaîne donc `chunk_sent` → `hop_attempted` → `relay_received` → `hop_attempted` → … → `esquad_received`. Un même message essayé sur plusieurs membres d'une couche garde son `message_id`. Un renvoi est rechiffré : il a un `message_id` différent.
 
 ## 4. Événements
 
-| `ev` | Écrit par | Rôle |
+| `event` | Écrit par | Rôle |
 |---|---|---|
-| `run_start` | banc | paramètres de l'exécution |
-| `device` | banc | déclaration d'un appareil et de son utilisateur |
-| `churn` | banc | changement de disponibilité réelle (X_réel) |
-| `run_end` | banc | fin normale de l'exécution |
-| `interaction` | e-squad | interaction USE, UL ou DL (`Use`, `Upload`, `Download`) émise par l'appareil |
-| `interaction_learned` | e-squad | interaction d'un autre appareil apprise par gossip (niveau détaillé) |
+| `run_started` | banc | paramètres de l'exécution |
+| `device_declared` | banc | déclaration d'un appareil et de son utilisateur |
+| `availability_changed` | banc | changement de disponibilité réelle d'un appareil |
+| `run_ended` | banc | fin normale de l'exécution |
+| `interaction_recorded` | e-squad | interaction ajoutée à la séquence de l'appareil, émise par lui ou apprise par gossip |
 | `descriptor_published` | prédiction | descripteur publié dans le RPS avec p(d) |
-| `channel_offer` | routes | message hors bande n° 1 produit (Alice) |
-| `channel_accept` | routes | message hors bande n° 2 produit (Bob) |
+| `channel_offered` | routes | message hors bande n° 1 produit (Alice) |
+| `channel_accepted` | routes | message hors bande n° 2 produit (Bob) |
 | `layer_built` | routes | couche construite (PickLayer, ou e-squad) |
-| `route_ready` | routes | route complète à 4 couches |
-| `hop` | relais | tentative d'envoi vers un nœud, et son issue |
-| `relay_recv` | relais | message reçu et déchiffré par un nœud |
-| `drop` | relais | abandon : tous les membres de la couche suivante ont échoué |
-| `esquad_rx` | e-squad | charge utile reçue en dernière couche, et ce qu'en fait l'appareil |
-| `cache` | e-squad | opération sur le cache de l'e-squad |
-| `transfer_start` | transfert | premier usage du canal par l'émetteur |
+| `route_completed` | routes | route complète à 4 couches |
+| `hop_attempted` | relais | tentative d'envoi vers un nœud, et son issue |
+| `relay_received` | relais | message reçu et déchiffré par un nœud |
+| `message_dropped` | relais | abandon : tous les membres de la couche suivante ont échoué |
+| `esquad_received` | e-squad | chunk ou ACK reçu en dernière couche, et ce qu'en fait l'appareil |
+| `cache_updated` | e-squad | opération sur le cache de l'e-squad |
+| `transfer_started` | transfert | premier usage du canal par l'émetteur |
 | `chunk_sent` | transfert | chunk émis ou renvoyé |
-| `chunk_recv` | transfert | chunk reçu et vérifié contre δ par l'appareil récepteur |
+| `chunk_received` | transfert | chunk reçu et vérifié contre δ par l'appareil récepteur |
 | `ack_sent` | transfert | ACK émis |
-| `ack_recv` | transfert | ACK reçu par l'émetteur |
-| `transfer_end` | transfert | fin du transfert, côté émetteur ou récepteur |
+| `ack_received` | transfert | ACK reçu par l'émetteur |
+| `transfer_ended` | transfert | fin du transfert, côté émetteur ou récepteur |
 
 Tous les champs listés ci-dessous sont obligatoires. Ceux qui peuvent être `null` le disent.
 
 ### 4.1 Banc d'essai
 
-**`run_start`** (`node` = `null`)
+**`run_started`** (`node` = `null`)
 
 | Champ | Type | Sens |
 |---|---|---|
-| `v` | entier | version du format (1) |
+| `version` | entier | version du format (1) |
 | `seed` | entier | graine de l'exécution |
-| `params` | objet | paramètres de l'exécution ; seul `T_ms` (période d'un tour) est obligatoire |
+| `params` | objet | paramètres de l'exécution ; seul `round_duration_ms` (durée d'un tour) est obligatoire |
 
-Clés attendues dans `params`, pour que le lanceur de campagnes (#32) range les traces par configuration : `label`, `T_ms`, `users`, `devices_per_user`, `model`, `mu`, `eps`, `l_max`, `l_v`, `file_size`, `chunk_size`, `window`, `rto_ms`, `dead_ms`, `hop_timeout_ms`, `delta_ms` (délai Δ entre création et usage, E5). On en ajoute librement.
+Clés usuelles de `params` : `label`, `round_duration_ms`, `user_count`, `devices_per_user`, `churn_model`, `mean_availability`, `epsilon`, `max_layer_size`, `view_size`, `file_size`, `chunk_size`, `window_size`, `retransmit_timeout_ms`, `dead_channel_timeout_ms`, `hop_timeout_ms`, `usage_delay_ms` (délai entre la création du canal et son premier usage). D'autres clés peuvent s'ajouter.
 
-**`device`** : `user` (entier), l'utilisateur, donc l'e-squad, auquel appartient l'appareil ; `id` (hexadécimal), son `NodeId`, c'est-à-dire l'empreinte SHA-256 qui l'identifie dans le protocole. Un `device` par appareil, avant tout autre événement qui le cite.
+**`device_declared`** : `user` (entier), l'utilisateur, donc l'e-squad, auquel appartient l'appareil ; `node_id` (64 caractères hexadécimaux), son `NodeId`. Un `device_declared` par appareil, avant tout autre événement qui le cite.
 
-**`churn`** : `online` (booléen). Un événement par appareil à t = 0 (état initial), puis un à chaque changement. C'est X_réel : X_réel(d, i) est l'état de d au début du tour i. Le protocole ne le lit jamais (D8).
+**`availability_changed`** : `online` (booléen). Un événement par appareil au temps 0 (état initial), puis un à chaque changement. L'état d'un appareil au tour i est son état au début de ce tour.
 
-**`run_end`** (`node` = `null`) : aucun champ.
+**`run_ended`** (`node` = `null`) : aucun champ.
 
 ### 4.2 E-squad et prédiction
 
-**`interaction`**
+**`interaction_recorded`** : écrit quand une interaction entre dans la séquence d'interactions de l'appareil `node`. Ses champs sont ceux d'`Interaction`.
 
 | Champ | Type | Sens |
 |---|---|---|
-| `kind` | `"Use"`, `"Upload"`, `"Download"` | type de l'interaction (`InteractionKind`) : USE, UL ou DL |
+| `at` | entier | tour de l'interaction (`Round`) |
+| `actor` | entier | appareil sur lequel l'interaction a eu lieu |
+| `kind` | `"Use"`, `"Upload"`, `"Download"` | type de l'interaction (`InteractionKind`) |
 | `file` | `FileId` ou `null` | fichier concerné pour `Upload` et `Download` ; `null` pour `Use` |
 
-`Upload` et `Download` sont émis à la création du canal (D13).
-
-**`interaction_learned`** (niveau détaillé, activable par configuration) : `actor` (appareil qui a émis l'interaction), `at` (tour de l'interaction), `kind`. Sert à mesurer la vitesse de convergence du gossip (O8, #27).
+Si `actor` = `node`, l'appareil a émis l'interaction ; sinon, il l'a apprise par gossip. Les interactions apprises ne sont écrites que si le niveau de trace détaillé est activé. `Upload` et `Download` sont émis à la création du canal.
 
 **`descriptor_published`**
 
@@ -111,106 +109,87 @@ Clés attendues dans `params`, pour que le lanceur de campagnes (#32) range les 
 |---|---|---|
 | `published_at` | entier | tour i de la prédiction |
 | `availability` | flottant | P_i(d) publié |
-| `fallback` | booléen | vrai si l'état courant n'avait jamais été vu (repli du prédicteur) |
+| `used_fallback` | booléen | vrai si l'état courant n'avait jamais été vu et que le prédicteur a utilisé son repli |
 
-**`esquad_rx`** : écrit par un appareil de l'e-squad qui reçoit un chunk ou un ACK, soit en dernière couche d'une route, soit d'un autre membre de son e-squad.
+**`esquad_received`** : écrit par un appareil de l'e-squad qui reçoit un chunk ou un ACK, soit en dernière couche d'une route, soit d'un autre membre de son e-squad.
 
 | Champ | Type | Sens |
 |---|---|---|
-| `file`, `kind`, `index` | `FileId`, `"chunk"`/`"ack"`, entier | message concerné |
-| `mid` | hex | message par lequel il est arrivé |
-| `via` | `"route"`, `"esquad"` | dernière couche d'une route, ou retransmission interne |
+| `file`, `transfer_kind`, `index` | `FileId`, `"chunk"`/`"ack"`, entier | chunk ou ACK concerné |
+| `message_id` | hex | message par lequel il est arrivé |
+| `received_via` | `"route"`, `"esquad"` | dernière couche d'une route, ou retransmission interne |
 | `action` | `"local"`, `"forward"`, `"cache"`, `"drop"` | remis au transfert de cet appareil ; transmis à l'appareil visé ; gardé ; jeté |
 | `reason` | chaîne ou `null` | pour `cache` : `"offline"`, `"unknown_file"` ; pour `drop` : `"duplicate"`, `"bad_hash"`, `"unknown_file"` ; `null` sinon |
 
-**`cache`** : `file`, `kind`, `index`, `op` (`"put"`, `"deliver"`, `"evict"`, `"expire"`), `entries` (nombre d'entrées du cache après l'opération). Un `esquad_rx` d'action `cache` est suivi d'un `cache` `put`. `deliver` est suivi du `hop` interne vers l'appareil visé.
+**`cache_updated`** : `file`, `transfer_kind`, `index`, `operation` (`"put"`, `"deliver"`, `"evict"`, `"expire"`), `entry_count` (nombre d'entrées du cache après l'opération). Un `esquad_received` d'action `cache` est suivi d'un `cache_updated` `put`. Un `deliver` est suivi du `hop_attempted` interne vers l'appareil visé.
 
 ### 4.3 Canaux et routes
 
-**`channel_offer`** (Alice) : `file`, `size`, `chunk_size`, `chunk_count`, `oob_bytes` (taille codée du message hors bande n° 1).
+**`channel_offered`** (Alice) : `file`, `size` (taille du fichier), `chunk_size`, `chunk_count`, `out_of_band_bytes` (taille codée du message hors bande n° 1).
 
-**`channel_accept`** (Bob) : `file`, `oob_bytes` (taille du message n° 2).
+**`channel_accepted`** (Bob) : `file`, `out_of_band_bytes` (taille du message n° 2).
 
-**`layer_built`** : écrit par l'appareil qui construit la couche. Alice écrit BL3, BL4, FL1 et FL2 ; Bob écrit FL3, FL4, BL1 et BL2. La date de l'événement dit quand les couches de tête ont été tirées (O2).
+**`layer_built`** : écrit par l'appareil qui construit la couche. Alice écrit BL3, BL4, FL1 et FL2 ; Bob écrit FL3, FL4, BL1 et BL2.
 
 | Champ | Type | Sens |
 |---|---|---|
-| `file`, `dir`, `pos` | | couche concernée |
+| `file`, `direction`, `position` | | couche concernée |
 | `members` | liste d'entiers | membres, dans l'ordre de la couche |
 | `availability` | liste de flottants ou `null` | p(d) utilisés, dans le même ordre (`null` si inconnu) |
-| `unavail` | flottant ou `null` | indisponibilité prédite ∏(1 − p) |
-| `stop` | `"eps"`, `"lmax"`, `"view"`, `"esquad"` | arrêt de PickLayer : ε atteint, L_max atteint, vue épuisée ; `"esquad"` pour la couche 4, qui n'est pas tirée |
-| `view` | entier ou `null` | nombre de candidats dans la vue au moment du tirage ; `null` pour la couche 4 |
+| `predicted_unavailability` | flottant ou `null` | indisponibilité prédite ∏(1 − p) |
+| `stop_reason` | `"epsilon_reached"`, `"max_size_reached"`, `"view_exhausted"`, `"esquad_layer"` | arrêt de PickLayer : ε atteint, taille maximale atteinte, vue épuisée ; `"esquad_layer"` pour la couche 4, qui n'est pas tirée |
+| `view_size` | entier ou `null` | nombre de candidats dans la vue au moment du tirage ; `null` pour la couche 4 |
 
-**`route_ready`** : `file`, `dir`, `sizes` (taille des 4 couches). Alice l'écrit pour `fwd`, Bob pour `bwd`.
+**`route_completed`** : `file`, `direction`, `layer_sizes` (taille des 4 couches). Alice l'écrit pour `forward`, Bob pour `backward`.
 
 ### 4.4 Relayage
 
-**`hop`** : une tentative d'envoi, écrite par l'expéditeur du saut (source, relais ou membre d'e-squad).
+**`hop_attempted`** : une tentative d'envoi, écrite par l'expéditeur du saut (source, relais ou membre d'e-squad).
 
 | Champ | Type | Sens |
 |---|---|---|
-| `to` | entier | appareil visé |
-| `mid` | hex | message envoyé |
-| `bytes` | entier | taille envoyée |
-| `try` | entier ≥ 1 | rang de la tentative dans la couche (1 = premier membre essayé) |
-| `ok` | booléen | issue (O4 : en simulation, le destinataire est en ligne) |
-| `ctx` | `"route"`, `"esquad"` | saut d'une route, ou retransmission interne à l'e-squad |
+| `target` | entier | appareil visé |
+| `message_id` | hex | message envoyé |
+| `size_bytes` | entier | taille envoyée |
+| `rank_in_layer` | entier ≥ 1 | rang de la tentative dans la couche (1 = premier membre essayé) |
+| `success` | booléen | issue de l'envoi ; en simulation, vrai si et seulement si l'appareil visé est en ligne |
+| `context` | `"route"`, `"esquad"` | saut d'une route, ou retransmission interne à l'e-squad |
 
-**`relay_recv`** : écrit par le nœud qui reçoit un message de route.
+**`relay_received`** : écrit par le nœud qui reçoit un message de route.
 
 | Champ | Type | Sens |
 |---|---|---|
-| `mid` | hex | message reçu |
-| `bytes` | entier | taille reçue (sert à mesurer la fuite de position, D5) |
-| `tries` | entier | déchiffrements asymétriques essayés sur l'enveloppe (coût, E2) |
-| `result` | `"forward"`, `"deliver"`, `"reject"` | à relayer ; charge utile pour la dernière couche ; échec du déchiffrement (⊥) |
-| `out` | hex ou `null` | message réémis, si `forward` |
-| `next` | liste d'entiers ou `null` | membres de la couche suivante lus dans @, si `forward` |
+| `message_id` | hex | message reçu |
+| `size_bytes` | entier | taille reçue |
+| `decryption_attempts` | entier | déchiffrements asymétriques essayés sur l'enveloppe |
+| `decision` | `"forward"`, `"deliver"`, `"reject"` | à relayer ; charge utile pour la dernière couche ; échec du déchiffrement (⊥) |
+| `forwarded_message_id` | hex ou `null` | message réémis, si `forward` |
+| `next_layer` | liste d'entiers ou `null` | membres de la couche suivante lus dans l'en-tête, si `forward` |
 
-**`drop`** : `mid` (message abandonné), `tried` (nombre de membres essayés). Un nœud qui l'écrit a échoué sur toute la couche suivante.
+**`message_dropped`** : `message_id` (message abandonné), `attempted_targets` (nombre de membres essayés). Le nœud qui l'écrit a échoué sur toute la couche suivante.
 
 ### 4.5 Transfert
 
-| `ev` | Écrit par | Champs |
+| `event` | Écrit par | Champs |
 |---|---|---|
-| `transfer_start` | émetteur | `file`, `chunk_count`, `window`, `rto_ms`, `dead_ms` |
-| `chunk_sent` | émetteur | `file`, `index`, `attempt` (1 = premier envoi, > 1 = renvoi), `mid`, `header_bytes` (en-tête oignon ajouté à la charge utile) |
-| `chunk_recv` | récepteur | `file`, `index`, `valid` (haché conforme à δ), `dup` (déjà reçu) |
-| `ack_sent` | récepteur | `file`, `index`, `mid`, `header_bytes` |
-| `ack_recv` | émetteur | `file`, `index`, `dup` (déjà acquitté) |
-| `transfer_end` | les deux | `file`, `side` (`"sender"`, `"receiver"`), `outcome`, `chunks_done` |
+| `transfer_started` | émetteur | `file`, `chunk_count`, `window_size`, `retransmit_timeout_ms`, `dead_channel_timeout_ms` |
+| `chunk_sent` | émetteur | `file`, `index`, `attempt` (1 = premier envoi, > 1 = renvoi), `message_id`, `header_bytes` (en-tête oignon ajouté à la charge utile) |
+| `chunk_received` | récepteur | `file`, `index`, `hash_valid` (haché conforme à δ), `duplicate` (déjà reçu) |
+| `ack_sent` | récepteur | `file`, `index`, `message_id`, `header_bytes` |
+| `ack_received` | émetteur | `file`, `index`, `duplicate` (déjà acquitté) |
+| `transfer_ended` | les deux | `file`, `side` (`"sender"`, `"receiver"`), `outcome`, `completed_chunks` |
 
 `outcome` vaut :
 
-- `"complete"` : côté émetteur, tous les chunks sont acquittés ; côté récepteur, le fichier est complet et vérifié. **Un fichier est compté transmis si et seulement si le récepteur écrit `transfer_end` `complete`** (D3).
-- `"dead"` : côté émetteur seulement, aucun ACK pendant `dead_ms` (D3).
+- `"complete"` : côté émetteur, tous les chunks sont acquittés ; côté récepteur, le fichier est complet et vérifié. Un fichier est transmis si et seulement si le récepteur écrit `transfer_ended` avec `complete`.
+- `"dead"` : côté émetteur seulement, aucun ACK reçu pendant `dead_channel_timeout_ms`.
 - `"aborted"` : abandon demandé par l'utilisateur.
 
-Si la route aller meurt, le récepteur n'écrit rien : l'absence de `transfer_end` récepteur vaut « non transmis ».
+Si la route aller meurt, le récepteur n'écrit rien : sans `transfer_ended` côté récepteur, le fichier n'est pas transmis.
 
-## 5. Ce que chaque mesure utilise
+## 5. Relire une trace
 
-| Mesure | Événements |
-|---|---|
-| E1 : transferts achevés, temps de complétion | `transfer_start`, `transfer_end` |
-| E1 : succès par message, renvois par chunk | chaîne `chunk_sent` → `hop` / `relay_recv` → `esquad_rx`, `drop` ; `chunk_sent.attempt` |
-| E2 : taille des couches, arrêts par L_max | `layer_built.members`, `layer_built.stop` |
-| E2 : taille d'en-tête, coût de déchiffrement | `chunk_sent.header_bytes`, `ack_sent.header_bytes`, `relay_recv.tries` |
-| E3 : composition des routes, adversaires | `layer_built`, `device.user` |
-| E3 : messages saisis, exposition source / destinataire | chaîne par `mid` : qui a reçu quel message de qui |
-| E3 : fuite de position (D5) | `relay_recv.bytes` rapproché du rang, connu par la chaîne |
-| E4 : score des p(d) publiés, repli | `descriptor_published` et `churn` du tour suivant |
-| E4 : calibration des couches | `layer_built.unavail` et `churn` des membres |
-| E5 : Δ et route praticable au premier usage | `channel_offer.t`, `transfer_start.t`, `layer_built`, `churn` |
-| E5 : couche fautive (RPS ou e-squad) | `drop`, et `layer_built.pos` de la couche visée |
-| Cache borné, doublons, chunks corrompus (#29) | `cache.entries`, `esquad_rx.reason` |
-| Convergence du gossip (O8) | `interaction`, `interaction_learned` |
-| Visualisation (#38) | tous |
-
-## 6. Relire une trace
-
-Installation, une fois (environnement virtuel `.venv/` à la racine du dépôt, ignoré par git ; sous Debian ou Ubuntu, `pip` refuse d'installer dans le Python du système) :
+Installation, une fois, dans un environnement virtuel `.venv/` à la racine du dépôt (sous Debian ou Ubuntu, `pip` refuse d'installer dans le Python du système) :
 
 ```sh
 sudo apt install python3-venv      # Debian / Ubuntu / WSL, si `python3 -m venv` échoue
@@ -221,18 +200,25 @@ python3 -m venv .venv
 Puis, après `source .venv/bin/activate` :
 
 ```sh
-python3 evaluation/traces.py evaluation/exemples/trace-exemple.jsonl
+python3 evaluation/traces.py evaluation/examples/example_trace.jsonl
 python3 -m unittest discover -s evaluation
 ```
 
-La commande valide la trace, puis affiche un résumé calculé avec pandas. Elle sort en erreur si la trace ne respecte pas le format. La validation vérifie le schéma de chaque ligne, les bornes `run_start` / `run_end`, l'ordre des `t`, la déclaration de tout appareil cité, et deux invariants de simulation : un saut réussi vise un appareil en ligne d'après `churn`, et toute réception suit un saut réussi portant le même `mid`.
+La première commande valide la trace, puis affiche un résumé calculé avec pandas ; elle sort en erreur si la trace ne respecte pas le format. La validation vérifie :
+
+- le schéma de chaque ligne ;
+- la première ligne `run_started` et la dernière `run_ended` ;
+- que `time_ms` ne décroît jamais ;
+- que tout appareil cité a été déclaré par `device_declared` ;
+- qu'un saut réussi vise un appareil en ligne d'après `availability_changed` ;
+- que toute réception suit un saut réussi portant le même `message_id`.
 
 Depuis Python :
 
 ```python
 from traces import split
-tb = split("trace.jsonl")        # un DataFrame par type d'événement
-tb["layer_built"].groupby("pos")["members"].apply(lambda m: m.str.len().mean())
+tables = split("trace.jsonl")      # un DataFrame par type d'événement
+tables["layer_built"].groupby("position")["members"].apply(lambda m: m.str.len().mean())
 ```
 
-La trace d'exemple raconte un transfert de 2 chunks entre 5 utilisateurs de 3 appareils. On y trouve un saut raté (relais éteint), une remise interne dans l'e-squad, un chunk mis en cache pendant l'absence de Bob, un renvoi abandonné parce que toute la couche FL3 est éteinte, puis la remise depuis le cache au retour de Bob. Les tailles d'en-tête y sont des ordres de grandeur, pas des mesures.
+La trace d'exemple décrit un transfert de 2 chunks entre 5 utilisateurs de 3 appareils. On y trouve un saut raté (relais éteint), une remise interne dans l'e-squad, un chunk mis en cache pendant l'absence de Bob, un renvoi abandonné parce que toute la couche FL3 est éteinte, puis la remise depuis le cache au retour de Bob. Les tailles d'en-tête y sont des ordres de grandeur, pas des mesures.

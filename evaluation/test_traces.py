@@ -1,4 +1,4 @@
-"""Tests du lecteur de traces : python3 -m unittest discover -s evaluation"""
+"""Tests for the trace reader: python3 -m unittest discover -s evaluation"""
 
 import json
 import tempfile
@@ -7,70 +7,96 @@ from pathlib import Path
 
 from traces import SCHEMA, split, summary, validate
 
-EXEMPLE = Path(__file__).parent / "exemples" / "trace-exemple.jsonl"
+EXAMPLE_TRACE = Path(__file__).parent / "examples" / "example_trace.jsonl"
 
 
-def lines():
-    return EXEMPLE.read_text(encoding="utf-8").splitlines()
+def example_records() -> list[dict]:
+    lines = EXAMPLE_TRACE.read_text(encoding="utf-8").splitlines()
+    return [json.loads(line) for line in lines]
 
 
-class TraceExemple(unittest.TestCase):
-    def test_exemple_valide(self):
-        self.assertEqual(validate(EXEMPLE), [])
-
-    def test_exemple_couvre_tous_les_evenements(self):
-        self.assertEqual(set(split(EXEMPLE)), set(SCHEMA))
-
-    def test_relu_par_pandas(self):
-        tb = split(EXEMPLE)
-        self.assertEqual(len(tb["transfer_start"]), 1)
-        recv = tb["transfer_end"].query("side == 'receiver'")
-        self.assertEqual(recv["outcome"].tolist(), ["complete"])
-        self.assertIn("1 transmis sur 1", summary(EXEMPLE))
+def first(records: list[dict], event: str) -> dict:
+    return next(r for r in records if r["event"] == event)
 
 
-class TraceCorrompue(unittest.TestCase):
-    def check(self, mutate, attendu):
-        recs = [json.loads(l) for l in lines()]
-        mutate(recs)
+class ExampleTraceTest(unittest.TestCase):
+    def test_example_is_valid(self):
+        self.assertEqual(validate(EXAMPLE_TRACE), [])
+
+    def test_example_covers_every_event_type(self):
+        self.assertEqual(set(split(EXAMPLE_TRACE)), set(SCHEMA))
+
+    def test_example_is_read_by_pandas(self):
+        tables = split(EXAMPLE_TRACE)
+        self.assertEqual(len(tables["transfer_started"]), 1)
+        receiver = tables["transfer_ended"].query("side == 'receiver'")
+        self.assertEqual(receiver["outcome"].tolist(), ["complete"])
+        self.assertIn("1 transmitted out of 1", summary(EXAMPLE_TRACE))
+
+
+class CorruptedTraceTest(unittest.TestCase):
+    def assert_detected(self, mutate, expected_error):
+        records = example_records()
+        mutate(records)
         with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as f:
-            for r in recs:
-                f.write(json.dumps(r) + "\n")
-        errs = validate(f.name)
+            for record in records:
+                f.write(json.dumps(record) + "\n")
+        errors = validate(f.name)
         Path(f.name).unlink()
-        self.assertTrue(any(attendu in e for e in errs), errs)
+        self.assertTrue(any(expected_error in e for e in errors), errors)
 
-    def first(self, recs, ev):
-        return next(r for r in recs if r["ev"] == ev)
+    def test_missing_field(self):
+        self.assert_detected(
+            lambda rs: first(rs, "hop_attempted").pop("message_id"),
+            "missing field: message_id",
+        )
 
-    def test_champ_manquant(self):
-        self.check(lambda rs: self.first(rs, "hop").pop("mid"), "champ manquant : mid")
+    def test_unknown_event_type(self):
+        self.assert_detected(
+            lambda rs: first(rs, "hop_attempted").update(event="hop"), "unknown event type"
+        )
 
-    def test_evenement_inconnu(self):
-        self.check(lambda rs: self.first(rs, "hop").update(ev="saut"), "inconnu")
+    def test_value_outside_enum(self):
+        self.assert_detected(
+            lambda rs: first(rs, "layer_built").update(direction="fwd"), "invalid field direction"
+        )
 
-    def test_valeur_hors_enumeration(self):
-        self.check(lambda rs: self.first(rs, "layer_built").update(dir="aller"), "dir invalide")
+    def test_file_must_be_a_sha256_digest(self):
+        self.assert_detected(
+            lambda rs: first(rs, "chunk_sent").update(file="478d9404-f7bb-4c3e-90b9-652eb065be37"),
+            "invalid field file",
+        )
 
-    def test_temps_qui_recule(self):
-        self.check(lambda rs: rs[-2].update(t=0), "t décroît")
+    def test_time_going_backwards(self):
+        self.assert_detected(lambda rs: rs[-2].update(time_ms=0), "time_ms decreases")
 
-    def test_appareil_non_declare(self):
-        self.check(lambda rs: self.first(rs, "hop").update(to=999), "non déclaré")
+    def test_undeclared_device(self):
+        self.assert_detected(
+            lambda rs: first(rs, "hop_attempted").update(target=999), "not declared"
+        )
 
-    def test_saut_reussi_vers_noeud_eteint(self):
-        def mutate(rs):
-            off = next(r for r in rs if r["ev"] == "churn" and not r["online"])
-            hop = next(r for r in rs if r["ev"] == "hop" and r["t"] > off["t"] and r["ok"])
-            hop["to"] = off["node"]
+    def test_successful_hop_to_offline_node(self):
+        def mutate(records):
+            off = next(
+                r for r in records if r["event"] == "availability_changed" and not r["online"]
+            )
+            hop = next(
+                r
+                for r in records
+                if r["event"] == "hop_attempted" and r["time_ms"] > off["time_ms"] and r["success"]
+            )
+            hop["target"] = off["node"]
 
-        self.check(mutate, "hors ligne d'après churn")
+        self.assert_detected(mutate, "which is offline")
 
-    def test_reception_sans_saut(self):
-        self.check(lambda rs: self.first(rs, "relay_recv").update(mid="00"), "sans saut réussi")
+    def test_reception_without_hop(self):
+        self.assert_detected(
+            lambda rs: first(rs, "relay_received").update(message_id="00"),
+            "without a successful hop",
+        )
 
-    def test_trace_tronquee(self):
-        self.check(lambda rs: rs.pop(), "run_end")
+    def test_truncated_trace(self):
+        self.assert_detected(lambda rs: rs.pop(), "run_ended")
 
 
 if __name__ == "__main__":

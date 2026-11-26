@@ -1,15 +1,15 @@
-"""Lecture et validation des traces ShallotRouter (format v1, voir docs/traces.md).
+"""Read and validate ShallotRouter traces (format v1, see docs/traces.md).
 
-Usage :
+Usage:
     python3 evaluation/traces.py TRACE.jsonl [TRACE2.jsonl ...]
 
-Valide chaque trace contre le schéma, puis affiche un résumé calculé avec
-pandas. Code de sortie 1 si une trace contient une erreur.
+Validates each trace against the schema, then prints a summary computed with
+pandas. Exits with status 1 if any trace has an error.
 
-En bibliothèque :
+As a library:
     from traces import split, validate
-    tables = split("trace.jsonl")      # dict ev -> DataFrame
-    erreurs = validate("trace.jsonl")  # liste de chaînes, vide si conforme
+    tables = split("trace.jsonl")     # dict: event type -> DataFrame
+    errors = validate("trace.jsonl")  # list of strings, empty if valid
 """
 
 from __future__ import annotations
@@ -17,125 +17,139 @@ from __future__ import annotations
 import gzip
 import json
 import sys
-import uuid
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Iterator
 
 import pandas as pd
 
-VERSION = 1
+FORMAT_VERSION = 1
 
-# --- Schéma -----------------------------------------------------------------
+# --- Schema -----------------------------------------------------------------
 #
-# Types de champ :
-#   "int", "float", "bool", "str", "hex", "uuid", "obj"
-#   ("enum", {...})        une des valeurs données
-#   ("list", T)            liste d'éléments de type T
-#   ("null", T)            T ou null
-# Les champs communs (t, node, ev) sont vérifiés à part.
+# Field types:
+#   "int", "float", "bool", "str", "hex", "digest", "obj"
+#   ("enum", {...})        one of the given values
+#   ("list", T)            list of elements of type T
+#   ("null", T)            T or null
+# Common fields (time_ms, node, event) are checked separately.
 #
-# Les noms suivent les types Rust de shallot-types (#50) : FileId -> file,
+# Names follow the Rust types of shallot-types: FileId -> file,
 # ChunkIndex -> index, InteractionKind -> kind, NodeDescriptor -> availability
-# et published_at, FileDescriptor -> chunk_count, NodeId -> device.id.
+# and published_at, FileDescriptor -> size and chunk_count, NodeId -> node_id.
 
-NODE_NULL = {"run_start", "run_end"}
+EVENTS_WITHOUT_NODE = {"run_started", "run_ended"}
 
 HEX = "hex"
-FILE_ID = "uuid"  # FileId(Uuid), chaîne avec tirets
-DIRECTION = ("enum", {"fwd", "bwd"})
+DIGEST = "digest"  # SHA-256 (Digest), 64 lowercase hex characters
+DIRECTION = ("enum", {"forward", "backward"})
 TRANSFER_KIND = ("enum", {"chunk", "ack"})
 INTERACTION_KIND = ("enum", {"Use", "Upload", "Download"})
 
 SCHEMA: dict[str, dict[str, Any]] = {
-    # Banc d'essai (jamais écrit par le protocole, D8)
-    "run_start": {"v": "int", "seed": "int", "params": "obj"},
-    "device": {"user": "int", "id": HEX},
-    "churn": {"online": "bool"},
-    "run_end": {},
-    # E-squad et prédiction
-    "interaction": {"kind": INTERACTION_KIND, "file": ("null", FILE_ID)},
-    "interaction_learned": {"actor": "int", "at": "int", "kind": INTERACTION_KIND},
-    "descriptor_published": {"published_at": "int", "availability": "float", "fallback": "bool"},
-    "esquad_rx": {
-        "file": FILE_ID,
-        "kind": TRANSFER_KIND,
+    # Testbed
+    "run_started": {"version": "int", "seed": "int", "params": "obj"},
+    "device_declared": {"user": "int", "node_id": DIGEST},
+    "availability_changed": {"online": "bool"},
+    "run_ended": {},
+    # E-squad and prediction
+    # Same fields as Interaction in shallot-types
+    "interaction_recorded": {
+        "at": "int",
+        "actor": "int",
+        "kind": INTERACTION_KIND,
+        "file": ("null", DIGEST),
+    },
+    "descriptor_published": {
+        "published_at": "int",
+        "availability": "float",
+        "used_fallback": "bool",
+    },
+    "esquad_received": {
+        "file": DIGEST,
+        "transfer_kind": TRANSFER_KIND,
         "index": "int",
-        "mid": HEX,
-        "via": ("enum", {"route", "esquad"}),
+        "message_id": HEX,
+        "received_via": ("enum", {"route", "esquad"}),
         "action": ("enum", {"local", "forward", "cache", "drop"}),
         "reason": ("null", ("enum", {"offline", "unknown_file", "duplicate", "bad_hash"})),
     },
-    "cache": {
-        "file": FILE_ID,
-        "kind": TRANSFER_KIND,
+    "cache_updated": {
+        "file": DIGEST,
+        "transfer_kind": TRANSFER_KIND,
         "index": "int",
-        "op": ("enum", {"put", "deliver", "evict", "expire"}),
-        "entries": "int",
+        "operation": ("enum", {"put", "deliver", "evict", "expire"}),
+        "entry_count": "int",
     },
-    # Canaux et routes
-    "channel_offer": {
-        "file": FILE_ID,
+    # Channels and routes
+    "channel_offered": {
+        "file": DIGEST,
         "size": "int",
         "chunk_size": "int",
         "chunk_count": "int",
-        "oob_bytes": "int",
+        "out_of_band_bytes": "int",
     },
-    "channel_accept": {"file": FILE_ID, "oob_bytes": "int"},
+    "channel_accepted": {"file": DIGEST, "out_of_band_bytes": "int"},
     "layer_built": {
-        "file": FILE_ID,
-        "dir": DIRECTION,
-        "pos": "int",
+        "file": DIGEST,
+        "direction": DIRECTION,
+        "position": "int",
         "members": ("list", "int"),
         "availability": ("list", ("null", "float")),
-        "unavail": ("null", "float"),
-        "stop": ("enum", {"eps", "lmax", "view", "esquad"}),
-        "view": ("null", "int"),
+        "predicted_unavailability": ("null", "float"),
+        "stop_reason": (
+            "enum",
+            {"epsilon_reached", "max_size_reached", "view_exhausted", "esquad_layer"},
+        ),
+        "view_size": ("null", "int"),
     },
-    "route_ready": {"file": FILE_ID, "dir": DIRECTION, "sizes": ("list", "int")},
-    # Relayage
-    "hop": {
-        "to": "int",
-        "mid": HEX,
-        "bytes": "int",
-        "try": "int",
-        "ok": "bool",
-        "ctx": ("enum", {"route", "esquad"}),
+    "route_completed": {"file": DIGEST, "direction": DIRECTION, "layer_sizes": ("list", "int")},
+    # Relaying
+    "hop_attempted": {
+        "target": "int",
+        "message_id": HEX,
+        "size_bytes": "int",
+        "rank_in_layer": "int",
+        "success": "bool",
+        "context": ("enum", {"route", "esquad"}),
     },
-    "relay_recv": {
-        "mid": HEX,
-        "bytes": "int",
-        "tries": "int",
-        "result": ("enum", {"forward", "deliver", "reject"}),
-        "out": ("null", HEX),
-        "next": ("null", ("list", "int")),
+    "relay_received": {
+        "message_id": HEX,
+        "size_bytes": "int",
+        "decryption_attempts": "int",
+        "decision": ("enum", {"forward", "deliver", "reject"}),
+        "forwarded_message_id": ("null", HEX),
+        "next_layer": ("null", ("list", "int")),
     },
-    "drop": {"mid": HEX, "tried": "int"},
-    # Transfert
-    "transfer_start": {
-        "file": FILE_ID,
+    "message_dropped": {"message_id": HEX, "attempted_targets": "int"},
+    # Transfer
+    "transfer_started": {
+        "file": DIGEST,
         "chunk_count": "int",
-        "window": "int",
-        "rto_ms": "int",
-        "dead_ms": "int",
+        "window_size": "int",
+        "retransmit_timeout_ms": "int",
+        "dead_channel_timeout_ms": "int",
     },
-    "chunk_sent": {"file": FILE_ID, "index": "int", "attempt": "int", "mid": HEX, "header_bytes": "int"},
-    "chunk_recv": {"file": FILE_ID, "index": "int", "valid": "bool", "dup": "bool"},
-    "ack_sent": {"file": FILE_ID, "index": "int", "mid": HEX, "header_bytes": "int"},
-    "ack_recv": {"file": FILE_ID, "index": "int", "dup": "bool"},
-    "transfer_end": {
-        "file": FILE_ID,
+    "chunk_sent": {
+        "file": DIGEST,
+        "index": "int",
+        "attempt": "int",
+        "message_id": HEX,
+        "header_bytes": "int",
+    },
+    "chunk_received": {"file": DIGEST, "index": "int", "hash_valid": "bool", "duplicate": "bool"},
+    "ack_sent": {"file": DIGEST, "index": "int", "message_id": HEX, "header_bytes": "int"},
+    "ack_received": {"file": DIGEST, "index": "int", "duplicate": "bool"},
+    "transfer_ended": {
+        "file": DIGEST,
         "side": ("enum", {"sender", "receiver"}),
         "outcome": ("enum", {"complete", "dead", "aborted"}),
-        "chunks_done": "int",
+        "completed_chunks": "int",
     },
 }
 
-# Événements écrits par le banc d'essai seulement (D8).
-TESTBED_EVENTS = {"run_start", "device", "churn", "run_end"}
 
-
-# --- Lecture ----------------------------------------------------------------
+# --- Reading ----------------------------------------------------------------
 
 
 def _open(path: str | Path):
@@ -146,29 +160,29 @@ def _open(path: str | Path):
 
 
 def records(path: str | Path) -> Iterator[tuple[int, dict]]:
-    """Rend (numéro de ligne, événement) pour chaque ligne de la trace."""
+    """Yield (line number, event) for each line of the trace."""
     with _open(path) as f:
-        for lineno, line in enumerate(f, start=1):
-            yield lineno, json.loads(line)
+        for line_number, line in enumerate(f, start=1):
+            yield line_number, json.loads(line)
 
 
 def load(path: str | Path) -> pd.DataFrame:
-    """Toute la trace dans un seul DataFrame (une colonne par champ rencontré)."""
+    """Whole trace in a single DataFrame (one column per field seen)."""
     df = pd.read_json(path, lines=True, compression="infer")
     df["node"] = df["node"].astype("Int64")
     return df
 
 
 def split(path: str | Path) -> dict[str, pd.DataFrame]:
-    """Un DataFrame par type d'événement, avec seulement ses propres colonnes."""
+    """One DataFrame per event type, with only that event's columns."""
     groups: dict[str, list[dict]] = defaultdict(list)
-    for _, rec in records(path):
-        groups[rec["ev"]].append(rec)
+    for _, record in records(path):
+        groups[record["event"]].append(record)
     tables = {}
-    for ev, recs in groups.items():
-        df = pd.DataFrame.from_records(recs).drop(columns="ev")
+    for event, event_records in groups.items():
+        df = pd.DataFrame.from_records(event_records).drop(columns="event")
         df["node"] = df["node"].astype("Int64")
-        tables[ev] = df
+        tables[event] = df
     return tables
 
 
@@ -195,206 +209,226 @@ def _check_type(value: Any, spec: Any) -> bool:
         return isinstance(value, str)
     if spec == HEX:
         return isinstance(value, str) and value != "" and all(c in "0123456789abcdef" for c in value)
-    if spec == FILE_ID:
-        try:
-            return isinstance(value, str) and str(uuid.UUID(value)) == value
-        except ValueError:
-            return False
+    if spec == DIGEST:
+        return _check_type(value, HEX) and len(value) == 64
     if spec == "obj":
         return isinstance(value, dict)
     raise ValueError(spec)
 
 
-def _check_record(rec: dict) -> list[str]:
-    errs = []
-    ev = rec.get("ev")
-    if ev not in SCHEMA:
-        return [f"type d'événement inconnu : {ev!r}"]
-    t = rec.get("t")
-    if not _check_type(t, "int") or t < 0:
-        errs.append(f"t invalide : {t!r}")
-    if "node" not in rec:
-        errs.append("champ manquant : node")
-    elif ev in NODE_NULL:
-        if rec["node"] is not None:
-            errs.append(f"{ev} doit avoir node = null")
-    elif not _check_type(rec["node"], "int"):
-        errs.append(f"node invalide : {rec['node']!r}")
-    for field, spec in SCHEMA[ev].items():
-        if field not in rec:
-            errs.append(f"champ manquant : {field}")
-        elif not _check_type(rec[field], spec):
-            errs.append(f"champ {field} invalide : {rec[field]!r}")
-    return errs
+def _check_record(record: dict) -> list[str]:
+    errors = []
+    event = record.get("event")
+    if event not in SCHEMA:
+        return [f"unknown event type: {event!r}"]
+    time_ms = record.get("time_ms")
+    if not _check_type(time_ms, "int") or time_ms < 0:
+        errors.append(f"invalid time_ms: {time_ms!r}")
+    if "node" not in record:
+        errors.append("missing field: node")
+    elif event in EVENTS_WITHOUT_NODE:
+        if record["node"] is not None:
+            errors.append(f"{event} must have node = null")
+    elif not _check_type(record["node"], "int"):
+        errors.append(f"invalid node: {record['node']!r}")
+    for field, spec in SCHEMA[event].items():
+        if field not in record:
+            errors.append(f"missing field: {field}")
+        elif not _check_type(record[field], spec):
+            errors.append(f"invalid field {field}: {record[field]!r}")
+    return errors
 
 
-def _check_semantics(rec: dict) -> list[str]:
-    """Contraintes entre champs d'un même événement."""
-    ev = rec["ev"]
-    errs = []
-    if ev == "interaction" and (rec["kind"] == "Use") != (rec["file"] is None):
-        errs.append("interaction : file doit être null pour Use et seulement pour Use")
-    elif ev == "layer_built":
-        if not 1 <= rec["pos"] <= 4:
-            errs.append(f"layer_built : pos hors de 1..4 : {rec['pos']}")
-        if len(rec["availability"]) != len(rec["members"]):
-            errs.append("layer_built : availability et members de longueurs différentes")
-        if len(set(rec["members"])) != len(rec["members"]):
-            errs.append("layer_built : membre en double")
-        if (rec["pos"] == 4) != (rec["stop"] == "esquad"):
-            errs.append("layer_built : stop = esquad si et seulement si pos = 4")
-    elif ev == "route_ready" and len(rec["sizes"]) != 4:
-        errs.append("route_ready : sizes doit avoir 4 éléments")
-    elif ev == "relay_recv":
-        fwd = rec["result"] == "forward"
-        if fwd != (rec["out"] is not None) or fwd != (rec["next"] is not None):
-            errs.append("relay_recv : out et next renseignés si et seulement si result = forward")
-    elif ev == "esquad_rx":
-        needs_reason = rec["action"] in {"cache", "drop"}
-        if needs_reason != (rec["reason"] is not None):
-            errs.append("esquad_rx : reason renseignée si et seulement si action = cache ou drop")
-    elif ev in {"hop", "chunk_sent"}:
-        key = "try" if ev == "hop" else "attempt"
-        if rec[key] < 1:
-            errs.append(f"{ev} : {key} commence à 1")
-    return errs
+def _check_semantics(record: dict) -> list[str]:
+    """Constraints between fields of the same event."""
+    event = record["event"]
+    errors = []
+    if event == "interaction_recorded" and (record["kind"] == "Use") != (record["file"] is None):
+        errors.append("interaction_recorded: file must be null for Use and only for Use")
+    elif event == "layer_built":
+        if not 1 <= record["position"] <= 4:
+            errors.append(f"layer_built: position outside 1..4: {record['position']}")
+        if len(record["availability"]) != len(record["members"]):
+            errors.append("layer_built: availability and members have different lengths")
+        if len(set(record["members"])) != len(record["members"]):
+            errors.append("layer_built: duplicate member")
+        if (record["position"] == 4) != (record["stop_reason"] == "esquad_layer"):
+            errors.append("layer_built: stop_reason = esquad_layer if and only if position = 4")
+    elif event == "route_completed" and len(record["layer_sizes"]) != 4:
+        errors.append("route_completed: layer_sizes must have 4 elements")
+    elif event == "relay_received":
+        forwarded = record["decision"] == "forward"
+        if forwarded != (record["forwarded_message_id"] is not None) or forwarded != (
+            record["next_layer"] is not None
+        ):
+            errors.append(
+                "relay_received: forwarded_message_id and next_layer set "
+                "if and only if decision = forward"
+            )
+    elif event == "esquad_received":
+        needs_reason = record["action"] in {"cache", "drop"}
+        if needs_reason != (record["reason"] is not None):
+            errors.append("esquad_received: reason set if and only if action = cache or drop")
+    elif event in {"hop_attempted", "chunk_sent"}:
+        key = "rank_in_layer" if event == "hop_attempted" else "attempt"
+        if record[key] < 1:
+            errors.append(f"{event}: {key} starts at 1")
+    return errors
 
 
 def validate(path: str | Path) -> list[str]:
-    """Rend la liste des erreurs de la trace (vide si elle est conforme).
+    """Return the list of errors in the trace (empty if it is valid).
 
-    Vérifie, en plus du schéma de chaque ligne :
-    - la première ligne est run_start en version VERSION, la dernière run_end ;
-    - t ne décroît jamais ;
-    - tout appareil cité a été déclaré par un événement device ;
-    - un saut réussi (hop ok) vise un appareil en ligne d'après churn ;
-    - toute réception (relay_recv, esquad_rx via esquad) suit un saut réussi
-      vers ce nœud portant le même mid.
+    Besides the schema of each line, checks that:
+    - the first line is run_started with version FORMAT_VERSION, the last run_ended;
+    - time_ms never decreases;
+    - every device mentioned was declared by device_declared;
+    - a successful hop targets a device that is online according to availability_changed;
+    - every reception (relay_received, esquad_received via esquad) follows a
+      successful hop to that node carrying the same message_id.
     """
     errors: list[str] = []
     devices: set[int] = set()
     online: dict[int, bool] = {}
-    delivered: set[tuple[int, str]] = set()  # (destinataire, mid) des sauts réussis
-    last_t = -1
-    last_ev = None
-    n = 0
+    delivered: set[tuple[int, str]] = set()  # (target, message_id) of successful hops
+    last_time = -1
+    last_event = None
+    line_count = 0
 
-    def err(lineno: int, msg: str) -> None:
-        errors.append(f"ligne {lineno} : {msg}")
+    def error(line_number: int, message: str) -> None:
+        errors.append(f"line {line_number}: {message}")
 
-    def known(lineno: int, node: int, what: str) -> None:
+    def check_declared(line_number: int, node: int, role: str) -> None:
         if node not in devices:
-            err(lineno, f"{what} {node} non déclaré par un événement device")
+            error(line_number, f"{role} {node} not declared by device_declared")
 
     try:
-        for lineno, rec in records(path):
-            n += 1
-            if not isinstance(rec, dict):
-                err(lineno, "la ligne n'est pas un objet JSON")
+        for line_number, record in records(path):
+            line_count += 1
+            if not isinstance(record, dict):
+                error(line_number, "line is not a JSON object")
                 continue
-            line_errs = _check_record(rec)
-            if line_errs:
-                for e in line_errs:
-                    err(lineno, e)
+            line_errors = _check_record(record)
+            if line_errors:
+                for e in line_errors:
+                    error(line_number, e)
                 continue
-            for e in _check_semantics(rec):
-                err(lineno, e)
+            for e in _check_semantics(record):
+                error(line_number, e)
 
-            ev, t, node = rec["ev"], rec["t"], rec["node"]
-            if lineno == 1:
-                if ev != "run_start":
-                    err(lineno, "la trace doit commencer par run_start")
-                elif rec["v"] != VERSION:
-                    err(lineno, f"version {rec['v']} non prise en charge (attendu {VERSION})")
-                elif not _check_type(rec["params"].get("T_ms"), "int"):
-                    err(lineno, "run_start : params.T_ms (entier) manquant")
-            elif ev == "run_start":
-                err(lineno, "run_start ailleurs qu'en première ligne")
-            if t < last_t:
-                err(lineno, f"t décroît ({t} < {last_t})")
-            last_t, last_ev = t, ev
+            event, time_ms, node = record["event"], record["time_ms"], record["node"]
+            if line_number == 1:
+                if event != "run_started":
+                    error(line_number, "trace must start with run_started")
+                elif record["version"] != FORMAT_VERSION:
+                    error(
+                        line_number,
+                        f"unsupported version {record['version']} (expected {FORMAT_VERSION})",
+                    )
+                elif not _check_type(record["params"].get("round_duration_ms"), "int"):
+                    error(line_number, "run_started: params.round_duration_ms (int) missing")
+            elif event == "run_started":
+                error(line_number, "run_started outside the first line")
+            if time_ms < last_time:
+                error(line_number, f"time_ms decreases ({time_ms} < {last_time})")
+            last_time, last_event = time_ms, event
 
-            if ev == "device":
+            if event == "device_declared":
                 devices.add(node)
                 continue
             if node is not None:
-                known(lineno, node, "appareil")
+                check_declared(line_number, node, "device")
 
-            if ev == "churn":
-                online[node] = rec["online"]
-            elif ev == "layer_built":
-                for m in rec["members"]:
-                    known(lineno, m, "membre")
-            elif ev == "hop":
-                known(lineno, rec["to"], "destinataire")
-                if rec["ok"]:
-                    if online.get(rec["to"]) is False:
-                        err(lineno, f"saut réussi vers {rec['to']}, hors ligne d'après churn")
-                    delivered.add((rec["to"], rec["mid"]))
-            elif ev == "relay_recv":
-                if (node, rec["mid"]) not in delivered:
-                    err(lineno, f"relay_recv de {rec['mid']} sans saut réussi vers {node}")
-                for m in rec["next"] or []:
-                    known(lineno, m, "membre")
-            elif ev == "esquad_rx" and rec["via"] == "esquad":
-                if (node, rec["mid"]) not in delivered:
-                    err(lineno, f"esquad_rx de {rec['mid']} sans saut réussi vers {node}")
+            if event == "availability_changed":
+                online[node] = record["online"]
+            elif event == "interaction_recorded":
+                check_declared(line_number, record["actor"], "actor")
+            elif event == "layer_built":
+                for member in record["members"]:
+                    check_declared(line_number, member, "member")
+            elif event == "hop_attempted":
+                check_declared(line_number, record["target"], "target")
+                if record["success"]:
+                    if online.get(record["target"]) is False:
+                        error(
+                            line_number,
+                            f"successful hop to {record['target']}, which is offline",
+                        )
+                    delivered.add((record["target"], record["message_id"]))
+            elif event == "relay_received":
+                if (node, record["message_id"]) not in delivered:
+                    error(
+                        line_number,
+                        f"relay_received of {record['message_id']} "
+                        f"without a successful hop to {node}",
+                    )
+                for member in record["next_layer"] or []:
+                    check_declared(line_number, member, "member")
+            elif event == "esquad_received" and record["received_via"] == "esquad":
+                if (node, record["message_id"]) not in delivered:
+                    error(
+                        line_number,
+                        f"esquad_received of {record['message_id']} "
+                        f"without a successful hop to {node}",
+                    )
     except json.JSONDecodeError as e:
-        errors.append(f"ligne {n + 1} : JSON invalide ({e.msg})")
+        errors.append(f"line {line_count + 1}: invalid JSON ({e.msg})")
         return errors
 
-    if n == 0:
-        errors.append("trace vide")
-    elif last_ev != "run_end":
-        errors.append("la trace ne se termine pas par run_end (exécution interrompue ?)")
+    if line_count == 0:
+        errors.append("empty trace")
+    elif last_event != "run_ended":
+        errors.append("trace does not end with run_ended (interrupted run?)")
     return errors
 
 
-# --- Résumé -----------------------------------------------------------------
+# --- Summary ----------------------------------------------------------------
 
 
 def summary(path: str | Path) -> str:
-    """Quelques indicateurs calculés avec pandas, pour vérifier qu'une trace se relit."""
-    tb = split(path)
-    run = tb["run_start"].iloc[0]
-    out = [f"Trace {path}", f"  format v{run['v']}, graine {run['seed']}"]
+    """A few indicators computed with pandas, to check that a trace can be read."""
+    tables = split(path)
+    run = tables["run_started"].iloc[0]
+    lines = [f"Trace {path}", f"  format v{run['version']}, seed {run['seed']}"]
 
-    counts = {ev: len(df) for ev, df in tb.items()}
-    out.append("  événements : " + ", ".join(f"{ev}={c}" for ev, c in sorted(counts.items())))
+    counts = {event: len(df) for event, df in tables.items()}
+    lines.append("  events: " + ", ".join(f"{e}={c}" for e, c in sorted(counts.items())))
 
-    if "transfer_end" in tb:
-        ends = tb["transfer_end"].pivot_table(
+    if "transfer_ended" in tables:
+        ends = tables["transfer_ended"].pivot_table(
             index="file", columns="side", values="outcome", aggfunc="last"
         )
-        starts = tb["transfer_start"].set_index("file")["t"]
-        recv = tb["transfer_end"].query("side == 'receiver' and outcome == 'complete'")
-        recv = recv.set_index("file")["t"]
-        transmitted = recv.reindex(starts.index).notna()
-        out.append(f"  transferts : {transmitted.sum()} transmis sur {len(starts)}")
+        starts = tables["transfer_started"].set_index("file")["time_ms"]
+        received = tables["transfer_ended"].query("side == 'receiver' and outcome == 'complete'")
+        received = received.set_index("file")["time_ms"]
+        transmitted = received.reindex(starts.index).notna()
+        lines.append(f"  transfers: {transmitted.sum()} transmitted out of {len(starts)}")
         for file in starts.index:
-            dur = recv.get(file, float("nan")) - starts[file]
-            side = ends.loc[file].to_dict() if file in ends.index else {}
-            out.append(f"    {file[:8]}… émetteur={side.get('sender')} récepteur={side.get('receiver')} "
-                       f"durée={dur / 1000:.1f} s")
+            duration = received.get(file, float("nan")) - starts[file]
+            sides = ends.loc[file].to_dict() if file in ends.index else {}
+            lines.append(
+                f"    {file[:8]}… sender={sides.get('sender')} "
+                f"receiver={sides.get('receiver')} duration={duration / 1000:.1f} s"
+            )
 
-    if "hop" in tb:
-        hops = tb["hop"]
-        rate = hops.groupby("ctx")["ok"].mean()
-        out.append("  sauts réussis : " + ", ".join(f"{c} {r:.0%}" for c, r in rate.items()))
+    if "hop_attempted" in tables:
+        rates = tables["hop_attempted"].groupby("context")["success"].mean()
+        lines.append("  successful hops: " + ", ".join(f"{c} {r:.0%}" for c, r in rates.items()))
 
-    if "chunk_sent" in tb:
-        resent = (tb["chunk_sent"]["attempt"] > 1).sum()
-        out.append(f"  chunks émis : {len(tb['chunk_sent'])} dont {resent} renvois")
+    if "chunk_sent" in tables:
+        resent = (tables["chunk_sent"]["attempt"] > 1).sum()
+        lines.append(f"  chunks sent: {len(tables['chunk_sent'])}, of which {resent} resent")
 
-    if "layer_built" in tb:
-        lb = tb["layer_built"].assign(size=lambda d: d["members"].str.len())
-        by = lb.groupby("pos")["size"].mean()
-        out.append("  taille moyenne des couches : "
-                   + ", ".join(f"L{p}={s:.1f}" for p, s in by.items()))
-        stops = lb["stop"].value_counts()
-        out.append("  arrêt de PickLayer : " + ", ".join(f"{k}={v}" for k, v in stops.items()))
+    if "layer_built" in tables:
+        layers = tables["layer_built"].assign(size=lambda d: d["members"].str.len())
+        sizes = layers.groupby("position")["size"].mean()
+        lines.append(
+            "  mean layer size: " + ", ".join(f"L{p}={s:.1f}" for p, s in sizes.items())
+        )
+        reasons = layers["stop_reason"].value_counts()
+        lines.append("  PickLayer stop: " + ", ".join(f"{k}={v}" for k, v in reasons.items()))
 
-    return "\n".join(out)
+    return "\n".join(lines)
 
 
 def main(argv: list[str]) -> int:
@@ -403,11 +437,11 @@ def main(argv: list[str]) -> int:
         return 2
     status = 0
     for path in argv:
-        errs = validate(path)
-        if errs:
+        errors = validate(path)
+        if errors:
             status = 1
-            print(f"{path} : {len(errs)} erreur(s)")
-            for e in errs:
+            print(f"{path}: {len(errors)} error(s)")
+            for e in errors:
                 print(f"  {e}")
             continue
         print(summary(path))
