@@ -67,6 +67,28 @@ class CorruptedTraceTest(unittest.TestCase):
             "invalid field file",
         )
 
+    def test_own_interaction_has_no_gossiper(self):
+        def mutate(records):
+            own = next(
+                r
+                for r in records
+                if r["event"] == "interaction_recorded" and r["actor"] == r["node"]
+            )
+            own["gossiper"] = own["node"] + 1
+
+        self.assert_detected(mutate, "gossiper null if and only if actor = node")
+
+    def test_gossiper_outside_the_esquad(self):
+        def mutate(records):
+            learned = next(
+                r
+                for r in records
+                if r["event"] == "interaction_recorded" and r["gossiper"] is not None
+            )
+            learned["gossiper"] = 14  # device of another user
+
+        self.assert_detected(mutate, "is not in the e-squad")
+
     def test_time_going_backwards(self):
         self.assert_detected(lambda rs: rs[-2].update(time_ms=0), "time_ms decreases")
 

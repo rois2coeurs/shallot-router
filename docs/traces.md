@@ -52,7 +52,7 @@ Le tour i (`Round`) d'un événement vaut ⌊`time_ms` / `params.round_duration_
 | `device_declared` | banc | déclaration d'un appareil et de son utilisateur |
 | `availability_changed` | banc | changement de disponibilité réelle d'un appareil |
 | `run_ended` | banc | fin normale de l'exécution |
-| `interaction_recorded` | e-squad | interaction ajoutée à la séquence de l'appareil, émise par lui ou apprise par gossip |
+| `interaction_recorded` | e-squad | interaction ajoutée à la séquence de l'appareil, émise par lui ou reçue par gossip |
 | `descriptor_published` | prédiction | descripteur publié dans le RPS avec p(d) |
 | `channel_offered` | routes | message hors bande n° 1 produit (Alice) |
 | `channel_accepted` | routes | message hors bande n° 2 produit (Bob) |
@@ -92,16 +92,19 @@ Clés usuelles de `params` : `label`, `round_duration_ms`, `user_count`, `device
 
 ### 4.2 E-squad et prédiction
 
-**`interaction_recorded`** : écrit quand une interaction entre dans la séquence d'interactions de l'appareil `node`. Ses champs sont ceux d'`Interaction`.
+**`interaction_recorded`** : écrit chaque fois qu'une interaction entre dans la séquence d'interactions de l'appareil `node`, qu'il l'ait émise lui-même ou reçue d'un autre membre de son e-squad par gossip. Toujours écrit.
 
 | Champ | Type | Sens |
 |---|---|---|
-| `at` | entier | tour de l'interaction (`Round`) |
+| `at` | entier | tour où l'interaction a eu lieu sur `actor` (`Round`) |
 | `actor` | entier | appareil sur lequel l'interaction a eu lieu |
-| `kind` | `"Use"`, `"Upload"`, `"Download"` | type de l'interaction (`InteractionKind`) |
-| `file` | `FileId` ou `null` | fichier concerné pour `Upload` et `Download` ; `null` pour `Use` |
+| `kind` | `"Use"`, `"Upload"`, `"Download"` | variante d'`InteractionKind` |
+| `file` | `FileId` ou `null` | fichier porté par `Upload` et `Download` (`InteractionKind::file()`) ; `null` pour `Use` |
+| `gossiper` | entier ou `null` | membre de l'e-squad qui a transmis l'interaction à `node` ; `null` si `node` l'a émise lui-même (`actor` = `node`) |
 
-Si `actor` = `node`, l'appareil a émis l'interaction ; sinon, il l'a apprise par gossip. Les interactions apprises ne sont écrites que si le niveau de trace détaillé est activé. `Upload` et `Download` sont émis à la création du canal.
+`at`, `actor`, `kind` et `file` identifient une interaction : toutes les lignes qui portent les mêmes valeurs décrivent la même interaction, émise une fois par `actor` puis apprise par chacun des autres membres. Le délai d'apprentissage est l'écart entre leurs `time_ms`. Le `gossiper` peut être un autre appareil que l'`actor` quand l'interaction a transité par un membre intermédiaire.
+
+`Upload` et `Download` sont émis à la création du canal.
 
 **`descriptor_published`**
 
@@ -210,6 +213,7 @@ La première commande valide la trace, puis affiche un résumé calculé avec pa
 - la première ligne `run_started` et la dernière `run_ended` ;
 - que `time_ms` ne décroît jamais ;
 - que tout appareil cité a été déclaré par `device_declared` ;
+- que l'`actor` et le `gossiper` d'une interaction sont dans l'e-squad de `node` ;
 - qu'un saut réussi vise un appareil en ligne d'après `availability_changed` ;
 - que toute réception suit un saut réussi portant le même `message_id`.
 

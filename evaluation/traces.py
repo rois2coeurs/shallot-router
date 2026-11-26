@@ -53,12 +53,14 @@ SCHEMA: dict[str, dict[str, Any]] = {
     "availability_changed": {"online": "bool"},
     "run_ended": {},
     # E-squad and prediction
-    # Same fields as Interaction in shallot-types
+    # Interaction of shallot-types (at, actor, kind), with InteractionKind::file()
+    # flattened into `file`, plus the device it was received from
     "interaction_recorded": {
         "at": "int",
         "actor": "int",
         "kind": INTERACTION_KIND,
         "file": ("null", DIGEST),
+        "gossiper": ("null", "int"),
     },
     "descriptor_published": {
         "published_at": "int",
@@ -245,6 +247,11 @@ def _check_semantics(record: dict) -> list[str]:
     errors = []
     if event == "interaction_recorded" and (record["kind"] == "Use") != (record["file"] is None):
         errors.append("interaction_recorded: file must be null for Use and only for Use")
+    if event == "interaction_recorded":
+        if (record["gossiper"] is None) != (record["actor"] == record["node"]):
+            errors.append("interaction_recorded: gossiper null if and only if actor = node")
+        if record["gossiper"] == record["node"]:
+            errors.append("interaction_recorded: gossiper must differ from node")
     elif event == "layer_built":
         if not 1 <= record["position"] <= 4:
             errors.append(f"layer_built: position outside 1..4: {record['position']}")
@@ -283,12 +290,13 @@ def validate(path: str | Path) -> list[str]:
     - the first line is run_started with version FORMAT_VERSION, the last run_ended;
     - time_ms never decreases;
     - every device mentioned was declared by device_declared;
+    - the actor and gossiper of an interaction belong to the e-squad of the node;
     - a successful hop targets a device that is online according to availability_changed;
     - every reception (relay_received, esquad_received via esquad) follows a
       successful hop to that node carrying the same message_id.
     """
     errors: list[str] = []
-    devices: set[int] = set()
+    users: dict[int, int] = {}  # device -> user, from device_declared
     online: dict[int, bool] = {}
     delivered: set[tuple[int, str]] = set()  # (target, message_id) of successful hops
     last_time = -1
@@ -299,7 +307,7 @@ def validate(path: str | Path) -> list[str]:
         errors.append(f"line {line_number}: {message}")
 
     def check_declared(line_number: int, node: int, role: str) -> None:
-        if node not in devices:
+        if node not in users:
             error(line_number, f"{role} {node} not declared by device_declared")
 
     try:
@@ -334,7 +342,7 @@ def validate(path: str | Path) -> list[str]:
             last_time, last_event = time_ms, event
 
             if event == "device_declared":
-                devices.add(node)
+                users[node] = record["user"]
                 continue
             if node is not None:
                 check_declared(line_number, node, "device")
@@ -342,7 +350,13 @@ def validate(path: str | Path) -> list[str]:
             if event == "availability_changed":
                 online[node] = record["online"]
             elif event == "interaction_recorded":
-                check_declared(line_number, record["actor"], "actor")
+                others = [record["actor"], record["gossiper"]]
+                for role, other in zip(("actor", "gossiper"), others):
+                    if other is None:
+                        continue
+                    check_declared(line_number, other, role)
+                    if users.get(other, users.get(node)) != users.get(node):
+                        error(line_number, f"{role} {other} is not in the e-squad of node {node}")
             elif event == "layer_built":
                 for member in record["members"]:
                     check_declared(line_number, member, "member")
