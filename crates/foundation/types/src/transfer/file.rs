@@ -1,14 +1,14 @@
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
 use crate::crypto::Digest;
 
+/// Hash SHA-256 of file
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct FileId(pub Uuid);
+pub struct FileId(pub Digest);
 
 impl FileId {
-    pub fn random() -> Self {
-        Self(Uuid::new_v4())
+    pub fn digest(&self) -> &Digest {
+        &self.0
     }
 }
 
@@ -17,16 +17,14 @@ pub struct FileDescriptor {
     id: FileId,
     size: u64,
     chunk_count: u64,
-    digest: Digest,
 }
 
 impl FileDescriptor {
-    pub fn new(id: FileId, size: u64, chunk_count: u64, digest: Digest) -> Self {
+    pub fn new(id: FileId, size: u64, chunk_count: u64) -> Self {
         Self {
             id,
             size,
             chunk_count,
-            digest,
         }
     }
 
@@ -41,10 +39,6 @@ impl FileDescriptor {
     pub fn chunk_count(&self) -> u64 {
         self.chunk_count
     }
-
-    pub fn digest(&self) -> &Digest {
-        &self.digest
-    }
 }
 
 #[cfg(test)]
@@ -54,7 +48,7 @@ mod tests {
 
     #[test]
     fn descriptor_cbor_roundtrip() {
-        let d = FileDescriptor::new(FileId::random(), 10_000, 10, Digest([9; 32]));
+        let d = FileDescriptor::new(FileId(Digest([9; 32])), 10_000, 10);
         assert_eq!(cbor_roundtrip(&d), d);
     }
 }

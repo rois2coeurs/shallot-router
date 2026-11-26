@@ -38,20 +38,20 @@ impl Chunk {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::cbor_roundtrip;
+    use crate::{crypto::Digest, test_utils::cbor_roundtrip};
     use proptest::prelude::*;
 
     proptest! {
         #[test]
-        fn chunk_cbor_roundtrip(idx: u64, data in proptest::collection::vec(any::<u8>(), 0..2048)) {
-            let c = Chunk::new(FileId::random(), ChunkIndex(idx), data);
+        fn chunk_cbor_roundtrip(id: [u8; 32], idx: u64, data in proptest::collection::vec(any::<u8>(), 0..2048)) {
+            let c = Chunk::new(FileId(Digest(id)), ChunkIndex(idx), data);
             prop_assert_eq!(cbor_roundtrip(&c), c);
         }
     }
 
     #[test]
     fn data_is_encoded_as_byte_string() {
-        let c = Chunk::new(FileId::random(), ChunkIndex(0), vec![0xFF; 100]);
+        let c = Chunk::new(FileId(Digest([1; 32])), ChunkIndex(0), vec![0xFF; 100]);
         let mut buf = Vec::new();
         ciborium::into_writer(&c, &mut buf).unwrap();
         assert!(buf.len() < 200, "encodé en {} octets", buf.len());

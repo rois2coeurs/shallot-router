@@ -31,6 +31,5 @@ shallot-simulation	= { path = "crates/testbed/simulation" }
 
 serde			= { version = "1", features = ["derive"] }
 thiserror		= "2"
-uuid			= { version = "1", features = ["v4", "fast-rng", "serde"] }
 ciborium		= "0.2"
 proptest		= "1"
