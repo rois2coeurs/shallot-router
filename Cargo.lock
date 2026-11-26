@@ -410,6 +410,9 @@ version = "0.1.0"
 [[package]]
 name = "shallot-prediction"
 version = "0.1.0"
+dependencies = [
+ "shallot-types",
+]
 
 [[package]]
 name = "shallot-relay"

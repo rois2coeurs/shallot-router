@@ -2,6 +2,7 @@
 name = "shallot-prediction"
 version.workspace = true
 edition.workspace = true
-respository.workspace = true
+repository.workspace = true
 
 [dependencies]
+shallot-types.workspace = true
