@@ -5,8 +5,17 @@ use crate::{node::NodeId, time::Round, transfer::FileId};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum InteractionKind {
     Use,
-    Upload,
-    Download,
+    Upload(FileId),
+    Download(FileId),
+}
+
+impl InteractionKind {
+    pub fn file(&self) -> Option<FileId> {
+        match self {
+            Self::Use => None,
+            Self::Upload(file) | Self::Download(file) => Some(*file),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -14,17 +23,11 @@ pub struct Interaction {
     at: Round,
     actor: NodeId,
     kind: InteractionKind,
-    file: FileId,
 }
 
 impl Interaction {
-    pub fn new(at: Round, actor: NodeId, kind: InteractionKind, file: FileId) -> Self {
-        Self {
-            at,
-            actor,
-            kind,
-            file,
-        }
+    pub fn new(at: Round, actor: NodeId, kind: InteractionKind) -> Self {
+        Self { at, actor, kind }
     }
 
     pub fn at(&self) -> Round {
@@ -39,7 +42,7 @@ impl Interaction {
         self.kind
     }
 
-    pub fn file(&self) -> FileId {
-        self.file
+    pub fn file(&self) -> Option<FileId> {
+        self.kind.file()
     }
 }
