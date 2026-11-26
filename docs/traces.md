@@ -27,19 +27,21 @@ Fichiers associés :
 | `node` | entier, ou `null` | appareil qui écrit l'événement ; `null` seulement pour `run_start` et `run_end` |
 | `ev` | chaîne | type de l'événement (§4) |
 
-Le tour i d'un événement se déduit de `t` : i = ⌊t / `params.T_ms`⌋.
+Le tour i (`Round`) d'un événement se déduit de `t` : i = ⌊t / `params.T_ms`⌋.
 
 ## 3. Conventions de valeurs
 
 | Valeur | Représentation |
 |---|---|
-| Appareil | entier attribué par le banc d'essai (0 à N − 1). Si O12 retient un identifiant dérivé de la clé, l'événement `device` donnera la correspondance |
-| `did` | δ.ID en hexadécimal minuscule ; identifie le fichier et le canal |
+| Appareil | entier attribué par le banc d'essai (0 à N − 1), plus court qu'un `NodeId` ; l'événement `device` donne la correspondance avec le `NodeId` |
+| `file` | `FileId` (δ.ID) : UUID v4 en chaîne avec tirets, tel que serde le sérialise ; identifie le fichier et le canal |
+| `index` | `ChunkIndex` : rang du chunk, à partir de 0 |
 | `mid` | empreinte d'un message tel qu'il passe sur un lien : les 16 premiers caractères hexadécimaux du SHA-256 des octets envoyés |
 | `dir` | `"fwd"` : route aller (Alice → Bob, chunks) ; `"bwd"` : route retour (Bob → Alice, ACK) |
 | `pos` | rang de la couche dans la route, de 1 à 4 ; 4 est l'e-squad du destinataire |
 | Durées, tailles | millisecondes (suffixe `_ms`), octets |
-| Probabilités | flottants dans [0, 1] |
+| Probabilités | flottants dans [0, 1] (`Probability`) |
+| Tours | entier i (`Round`) |
 
 **Le `mid` permet de reconstituer le chemin d'un message sans rien ajouter au protocole.** Un relais note le `mid` du message reçu et celui du message qu'il réémet (`relay_recv.mid` → `relay_recv.out`), et chaque saut porte le `mid` des octets envoyés. On chaîne donc `chunk_sent` → `hop` → `relay_recv` → `hop` → … → `esquad_rx`. Un même message essayé sur plusieurs membres d'une couche garde son `mid`. Un renvoi est rechiffré : il a un `mid` différent.
 
@@ -51,7 +53,7 @@ Le tour i d'un événement se déduit de `t` : i = ⌊t / `params.T_ms`⌋.
 | `device` | banc | déclaration d'un appareil et de son utilisateur |
 | `churn` | banc | changement de disponibilité réelle (X_réel) |
 | `run_end` | banc | fin normale de l'exécution |
-| `interaction` | e-squad | interaction USE, UL ou DL émise par l'appareil |
+| `interaction` | e-squad | interaction USE, UL ou DL (`Use`, `Upload`, `Download`) émise par l'appareil |
 | `interaction_learned` | e-squad | interaction d'un autre appareil apprise par gossip (niveau détaillé) |
 | `descriptor_published` | prédiction | descripteur publié dans le RPS avec p(d) |
 | `channel_offer` | routes | message hors bande n° 1 produit (Alice) |
@@ -84,7 +86,7 @@ Tous les champs listés ci-dessous sont obligatoires. Ceux qui peuvent être `nu
 
 Clés attendues dans `params`, pour que le lanceur de campagnes (#32) range les traces par configuration : `label`, `T_ms`, `users`, `devices_per_user`, `model`, `mu`, `eps`, `l_max`, `l_v`, `file_size`, `chunk_size`, `window`, `rto_ms`, `dead_ms`, `hop_timeout_ms`, `delta_ms` (délai Δ entre création et usage, E5). On en ajoute librement.
 
-**`device`** : `user` (entier), l'utilisateur, donc l'e-squad, auquel appartient l'appareil. Un `device` par appareil, avant tout autre événement qui le cite.
+**`device`** : `user` (entier), l'utilisateur, donc l'e-squad, auquel appartient l'appareil ; `id` (hexadécimal), son `NodeId`, c'est-à-dire l'empreinte SHA-256 qui l'identifie dans le protocole. Un `device` par appareil, avant tout autre événement qui le cite.
 
 **`churn`** : `online` (booléen). Un événement par appareil à t = 0 (état initial), puis un à chaque changement. C'est X_réel : X_réel(d, i) est l'état de d au début du tour i. Le protocole ne le lit jamais (D8).
 
@@ -96,51 +98,51 @@ Clés attendues dans `params`, pour que le lanceur de campagnes (#32) range les 
 
 | Champ | Type | Sens |
 |---|---|---|
-| `typ` | `"USE"`, `"UL"`, `"DL"` | type de l'interaction |
-| `did` | hex ou `null` | δ.ID pour UL et DL ; `null` pour USE |
+| `kind` | `"Use"`, `"Upload"`, `"Download"` | type de l'interaction (`InteractionKind`) : USE, UL ou DL |
+| `file` | `FileId` ou `null` | fichier concerné pour `Upload` et `Download` ; `null` pour `Use` |
 
-UL et DL sont émis à la création du canal (D13).
+`Upload` et `Download` sont émis à la création du canal (D13).
 
-**`interaction_learned`** (niveau détaillé, activable par configuration) : `origin` (appareil qui a émis l'interaction), `ts` (son horodatage, en ms), `typ`. Sert à mesurer la vitesse de convergence du gossip (O8, #27).
+**`interaction_learned`** (niveau détaillé, activable par configuration) : `actor` (appareil qui a émis l'interaction), `at` (tour de l'interaction), `kind`. Sert à mesurer la vitesse de convergence du gossip (O8, #27).
 
 **`descriptor_published`**
 
 | Champ | Type | Sens |
 |---|---|---|
-| `round` | entier | tour i de la prédiction |
-| `p` | flottant | P_i(d) publié |
+| `published_at` | entier | tour i de la prédiction |
+| `availability` | flottant | P_i(d) publié |
 | `fallback` | booléen | vrai si l'état courant n'avait jamais été vu (repli du prédicteur) |
 
 **`esquad_rx`** : écrit par un appareil de l'e-squad qui reçoit un chunk ou un ACK, soit en dernière couche d'une route, soit d'un autre membre de son e-squad.
 
 | Champ | Type | Sens |
 |---|---|---|
-| `did`, `kind`, `idx` | hex, `"chunk"`/`"ack"`, entier | message concerné |
+| `file`, `kind`, `index` | `FileId`, `"chunk"`/`"ack"`, entier | message concerné |
 | `mid` | hex | message par lequel il est arrivé |
 | `via` | `"route"`, `"esquad"` | dernière couche d'une route, ou retransmission interne |
 | `action` | `"local"`, `"forward"`, `"cache"`, `"drop"` | remis au transfert de cet appareil ; transmis à l'appareil visé ; gardé ; jeté |
-| `reason` | chaîne ou `null` | pour `cache` : `"offline"`, `"unknown_did"` ; pour `drop` : `"duplicate"`, `"bad_hash"`, `"unknown_did"` ; `null` sinon |
+| `reason` | chaîne ou `null` | pour `cache` : `"offline"`, `"unknown_file"` ; pour `drop` : `"duplicate"`, `"bad_hash"`, `"unknown_file"` ; `null` sinon |
 
-**`cache`** : `did`, `kind`, `idx`, `op` (`"put"`, `"deliver"`, `"evict"`, `"expire"`), `entries` (nombre d'entrées du cache après l'opération). Un `esquad_rx` d'action `cache` est suivi d'un `cache` `put`. `deliver` est suivi du `hop` interne vers l'appareil visé.
+**`cache`** : `file`, `kind`, `index`, `op` (`"put"`, `"deliver"`, `"evict"`, `"expire"`), `entries` (nombre d'entrées du cache après l'opération). Un `esquad_rx` d'action `cache` est suivi d'un `cache` `put`. `deliver` est suivi du `hop` interne vers l'appareil visé.
 
 ### 4.3 Canaux et routes
 
-**`channel_offer`** (Alice) : `did`, `size`, `chunk_size`, `chunks`, `oob_bytes` (taille codée du message hors bande n° 1).
+**`channel_offer`** (Alice) : `file`, `size`, `chunk_size`, `chunk_count`, `oob_bytes` (taille codée du message hors bande n° 1).
 
-**`channel_accept`** (Bob) : `did`, `oob_bytes` (taille du message n° 2).
+**`channel_accept`** (Bob) : `file`, `oob_bytes` (taille du message n° 2).
 
 **`layer_built`** : écrit par l'appareil qui construit la couche. Alice écrit BL3, BL4, FL1 et FL2 ; Bob écrit FL3, FL4, BL1 et BL2. La date de l'événement dit quand les couches de tête ont été tirées (O2).
 
 | Champ | Type | Sens |
 |---|---|---|
-| `did`, `dir`, `pos` | | couche concernée |
+| `file`, `dir`, `pos` | | couche concernée |
 | `members` | liste d'entiers | membres, dans l'ordre de la couche |
-| `p` | liste de flottants ou `null` | p(d) utilisés, dans le même ordre (`null` si inconnu) |
+| `availability` | liste de flottants ou `null` | p(d) utilisés, dans le même ordre (`null` si inconnu) |
 | `unavail` | flottant ou `null` | indisponibilité prédite ∏(1 − p) |
 | `stop` | `"eps"`, `"lmax"`, `"view"`, `"esquad"` | arrêt de PickLayer : ε atteint, L_max atteint, vue épuisée ; `"esquad"` pour la couche 4, qui n'est pas tirée |
 | `view` | entier ou `null` | nombre de candidats dans la vue au moment du tirage ; `null` pour la couche 4 |
 
-**`route_ready`** : `did`, `dir`, `sizes` (taille des 4 couches). Alice l'écrit pour `fwd`, Bob pour `bwd`.
+**`route_ready`** : `file`, `dir`, `sizes` (taille des 4 couches). Alice l'écrit pour `fwd`, Bob pour `bwd`.
 
 ### 4.4 Relayage
 
@@ -172,12 +174,12 @@ UL et DL sont émis à la création du canal (D13).
 
 | `ev` | Écrit par | Champs |
 |---|---|---|
-| `transfer_start` | émetteur | `did`, `chunks`, `window`, `rto_ms`, `dead_ms` |
-| `chunk_sent` | émetteur | `did`, `idx`, `attempt` (1 = premier envoi, > 1 = renvoi), `mid`, `header_bytes` (en-tête oignon ajouté à la charge utile) |
-| `chunk_recv` | récepteur | `did`, `idx`, `valid` (haché conforme à δ), `dup` (déjà reçu) |
-| `ack_sent` | récepteur | `did`, `idx`, `mid`, `header_bytes` |
-| `ack_recv` | émetteur | `did`, `idx`, `dup` (déjà acquitté) |
-| `transfer_end` | les deux | `did`, `side` (`"sender"`, `"receiver"`), `outcome`, `chunks_done` |
+| `transfer_start` | émetteur | `file`, `chunk_count`, `window`, `rto_ms`, `dead_ms` |
+| `chunk_sent` | émetteur | `file`, `index`, `attempt` (1 = premier envoi, > 1 = renvoi), `mid`, `header_bytes` (en-tête oignon ajouté à la charge utile) |
+| `chunk_recv` | récepteur | `file`, `index`, `valid` (haché conforme à δ), `dup` (déjà reçu) |
+| `ack_sent` | récepteur | `file`, `index`, `mid`, `header_bytes` |
+| `ack_recv` | émetteur | `file`, `index`, `dup` (déjà acquitté) |
+| `transfer_end` | les deux | `file`, `side` (`"sender"`, `"receiver"`), `outcome`, `chunks_done` |
 
 `outcome` vaut :
 

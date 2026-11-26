@@ -17,6 +17,7 @@ from __future__ import annotations
 import gzip
 import json
 import sys
+import uuid
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Iterator
@@ -28,65 +29,70 @@ VERSION = 1
 # --- Schéma -----------------------------------------------------------------
 #
 # Types de champ :
-#   "int", "float", "bool", "str", "hex", "obj"
+#   "int", "float", "bool", "str", "hex", "uuid", "obj"
 #   ("enum", {...})        une des valeurs données
 #   ("list", T)            liste d'éléments de type T
 #   ("null", T)            T ou null
 # Les champs communs (t, node, ev) sont vérifiés à part.
+#
+# Les noms suivent les types Rust de shallot-types (#50) : FileId -> file,
+# ChunkIndex -> index, InteractionKind -> kind, NodeDescriptor -> availability
+# et published_at, FileDescriptor -> chunk_count, NodeId -> device.id.
 
 NODE_NULL = {"run_start", "run_end"}
 
 HEX = "hex"
-DIR = ("enum", {"fwd", "bwd"})
-KIND = ("enum", {"chunk", "ack"})
-TYP = ("enum", {"USE", "UL", "DL"})
+FILE_ID = "uuid"  # FileId(Uuid), chaîne avec tirets
+DIRECTION = ("enum", {"fwd", "bwd"})
+TRANSFER_KIND = ("enum", {"chunk", "ack"})
+INTERACTION_KIND = ("enum", {"Use", "Upload", "Download"})
 
 SCHEMA: dict[str, dict[str, Any]] = {
     # Banc d'essai (jamais écrit par le protocole, D8)
     "run_start": {"v": "int", "seed": "int", "params": "obj"},
-    "device": {"user": "int"},
+    "device": {"user": "int", "id": HEX},
     "churn": {"online": "bool"},
     "run_end": {},
     # E-squad et prédiction
-    "interaction": {"typ": TYP, "did": ("null", HEX)},
-    "interaction_learned": {"origin": "int", "ts": "int", "typ": TYP},
-    "descriptor_published": {"round": "int", "p": "float", "fallback": "bool"},
+    "interaction": {"kind": INTERACTION_KIND, "file": ("null", FILE_ID)},
+    "interaction_learned": {"actor": "int", "at": "int", "kind": INTERACTION_KIND},
+    "descriptor_published": {"published_at": "int", "availability": "float", "fallback": "bool"},
     "esquad_rx": {
-        "did": HEX,
-        "kind": KIND,
-        "idx": "int",
+        "file": FILE_ID,
+        "kind": TRANSFER_KIND,
+        "index": "int",
         "mid": HEX,
         "via": ("enum", {"route", "esquad"}),
         "action": ("enum", {"local", "forward", "cache", "drop"}),
-        "reason": ("null", ("enum", {"offline", "unknown_did", "duplicate", "bad_hash"})),
+        "reason": ("null", ("enum", {"offline", "unknown_file", "duplicate", "bad_hash"})),
     },
     "cache": {
-        "did": HEX,
-        "kind": KIND,
-        "idx": "int",
+        "file": FILE_ID,
+        "kind": TRANSFER_KIND,
+        "index": "int",
         "op": ("enum", {"put", "deliver", "evict", "expire"}),
         "entries": "int",
     },
     # Canaux et routes
     "channel_offer": {
-        "did": HEX,
+        "file": FILE_ID,
         "size": "int",
         "chunk_size": "int",
-        "chunks": "int",
+        "chunk_count": "int",
         "oob_bytes": "int",
     },
-    "channel_accept": {"did": HEX, "oob_bytes": "int"},
+    "channel_accept": {"file": FILE_ID, "oob_bytes": "int"},
     "layer_built": {
-        "did": HEX,
-        "dir": DIR,
+        "file": FILE_ID,
+        "dir": DIRECTION,
         "pos": "int",
         "members": ("list", "int"),
-        "p": ("list", ("null", "float")),
+        "availability": ("list", ("null", "float")),
         "unavail": ("null", "float"),
         "stop": ("enum", {"eps", "lmax", "view", "esquad"}),
         "view": ("null", "int"),
     },
-    "route_ready": {"did": HEX, "dir": DIR, "sizes": ("list", "int")},
+    "route_ready": {"file": FILE_ID, "dir": DIRECTION, "sizes": ("list", "int")},
     # Relayage
     "hop": {
         "to": "int",
@@ -107,18 +113,18 @@ SCHEMA: dict[str, dict[str, Any]] = {
     "drop": {"mid": HEX, "tried": "int"},
     # Transfert
     "transfer_start": {
-        "did": HEX,
-        "chunks": "int",
+        "file": FILE_ID,
+        "chunk_count": "int",
         "window": "int",
         "rto_ms": "int",
         "dead_ms": "int",
     },
-    "chunk_sent": {"did": HEX, "idx": "int", "attempt": "int", "mid": HEX, "header_bytes": "int"},
-    "chunk_recv": {"did": HEX, "idx": "int", "valid": "bool", "dup": "bool"},
-    "ack_sent": {"did": HEX, "idx": "int", "mid": HEX, "header_bytes": "int"},
-    "ack_recv": {"did": HEX, "idx": "int", "dup": "bool"},
+    "chunk_sent": {"file": FILE_ID, "index": "int", "attempt": "int", "mid": HEX, "header_bytes": "int"},
+    "chunk_recv": {"file": FILE_ID, "index": "int", "valid": "bool", "dup": "bool"},
+    "ack_sent": {"file": FILE_ID, "index": "int", "mid": HEX, "header_bytes": "int"},
+    "ack_recv": {"file": FILE_ID, "index": "int", "dup": "bool"},
     "transfer_end": {
-        "did": HEX,
+        "file": FILE_ID,
         "side": ("enum", {"sender", "receiver"}),
         "outcome": ("enum", {"complete", "dead", "aborted"}),
         "chunks_done": "int",
@@ -189,6 +195,11 @@ def _check_type(value: Any, spec: Any) -> bool:
         return isinstance(value, str)
     if spec == HEX:
         return isinstance(value, str) and value != "" and all(c in "0123456789abcdef" for c in value)
+    if spec == FILE_ID:
+        try:
+            return isinstance(value, str) and str(uuid.UUID(value)) == value
+        except ValueError:
+            return False
     if spec == "obj":
         return isinstance(value, dict)
     raise ValueError(spec)
@@ -221,13 +232,13 @@ def _check_semantics(rec: dict) -> list[str]:
     """Contraintes entre champs d'un même événement."""
     ev = rec["ev"]
     errs = []
-    if ev == "interaction" and (rec["typ"] == "USE") != (rec["did"] is None):
-        errs.append("interaction : did doit être null pour USE et seulement pour USE")
+    if ev == "interaction" and (rec["kind"] == "Use") != (rec["file"] is None):
+        errs.append("interaction : file doit être null pour Use et seulement pour Use")
     elif ev == "layer_built":
         if not 1 <= rec["pos"] <= 4:
             errs.append(f"layer_built : pos hors de 1..4 : {rec['pos']}")
-        if len(rec["p"]) != len(rec["members"]):
-            errs.append("layer_built : p et members de longueurs différentes")
+        if len(rec["availability"]) != len(rec["members"]):
+            errs.append("layer_built : availability et members de longueurs différentes")
         if len(set(rec["members"])) != len(rec["members"]):
             errs.append("layer_built : membre en double")
         if (rec["pos"] == 4) != (rec["stop"] == "esquad"):
@@ -353,17 +364,17 @@ def summary(path: str | Path) -> str:
 
     if "transfer_end" in tb:
         ends = tb["transfer_end"].pivot_table(
-            index="did", columns="side", values="outcome", aggfunc="last"
+            index="file", columns="side", values="outcome", aggfunc="last"
         )
-        starts = tb["transfer_start"].set_index("did")["t"]
+        starts = tb["transfer_start"].set_index("file")["t"]
         recv = tb["transfer_end"].query("side == 'receiver' and outcome == 'complete'")
-        recv = recv.set_index("did")["t"]
+        recv = recv.set_index("file")["t"]
         transmitted = recv.reindex(starts.index).notna()
         out.append(f"  transferts : {transmitted.sum()} transmis sur {len(starts)}")
-        for did in starts.index:
-            dur = recv.get(did, float("nan")) - starts[did]
-            side = ends.loc[did].to_dict() if did in ends.index else {}
-            out.append(f"    {did[:8]}… émetteur={side.get('sender')} récepteur={side.get('receiver')} "
+        for file in starts.index:
+            dur = recv.get(file, float("nan")) - starts[file]
+            side = ends.loc[file].to_dict() if file in ends.index else {}
+            out.append(f"    {file[:8]}… émetteur={side.get('sender')} récepteur={side.get('receiver')} "
                        f"durée={dur / 1000:.1f} s")
 
     if "hop" in tb:
