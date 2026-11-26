@@ -33,4 +33,4 @@ jobs:
           cache-dependency-path: evaluation/requirements.txt
       - run: pip install -r evaluation/requirements.txt
       - run: python -m unittest discover -s evaluation -v
-      - run: python evaluation/traces.py evaluation/exemples/trace-exemple.jsonl
+      - run: python evaluation/traces.py evaluation/examples/example_trace.jsonl
